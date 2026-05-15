@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+  
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26'
+
+    - name: Show version info
+      run:
+        go version
+        git rev-parse --short HEAD
+
+    - name: Build cli (make)
+      run: make cli
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@4
+      with:
+        name: p2p-chat-cli
+        path: build/
