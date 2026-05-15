@@ -27,7 +27,7 @@ jobs:
       run: make cli
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@4
+      uses: actions/upload-artifact@v4
       with:
         name: p2p-chat-cli
         path: build/
