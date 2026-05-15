@@ -19,7 +19,7 @@ jobs:
         go-version: '1.26'
 
     - name: Show version info
-      run:
+      run: |
         go version
         git rev-parse --short HEAD
 
