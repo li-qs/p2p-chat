@@ -118,12 +118,12 @@ func (s *Session) closeWithError(err error) {
 
 // 绑定 stream，并开始监听消息。如果已经绑定过，则拒绝替换
 func (s *Session) BindStream(stream network.Stream) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.closed.Load() {
 		return errors.New(ErrSessionClosed)
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.stream != nil {
 		return errors.New(ErrStreamExisted)
@@ -137,6 +137,10 @@ func (s *Session) BindStream(stream network.Stream) error {
 
 // 确保有一个 stream
 func (s *Session) ensureStream() error {
+	if s.closed.Load() {
+		return errors.New(ErrSessionClosed)
+	}
+
 	s.mu.RLock()
 	if s.stream != nil {
 		s.mu.RUnlock()
@@ -169,9 +173,6 @@ func (s *Session) Send(payload message.Payload) error {
 }
 
 func (s *Session) send(msg *message.Message) error {
-	if s.closed.Load() {
-		return errors.New(ErrSessionClosed)
-	}
 	if err := s.ensureStream(); err != nil {
 		return err
 	}
@@ -214,7 +215,7 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 	s.pendingTransfer.Store(fileID, trans)
 	defer s.pendingTransfer.Delete(fileID)
 
-	// 发送询问：是否接受文件
+	// 发送询问：是否接收文件
 	err = s.Send(message.FileMetaPayload{
 		FileID:   fileID,
 		Name:     fileStat.Name(),
@@ -251,7 +252,7 @@ func (s *Session) startTransferFile(fileID string) {
 func (s *Session) stopTransferFile(fileID string) {
 	val, ok := s.pendingTransfer.Load(fileID)
 	if ok {
-		val.(*Transfer).accepted <- struct{}{}
+		val.(*Transfer).reject <- struct{}{}
 	}
 }
 
