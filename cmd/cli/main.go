@@ -26,13 +26,11 @@ type CLI struct {
 	mu sync.Mutex
 }
 
+func init() {
+	config.InitConfig("./config.yaml")
+}
+
 func main() {
-	var cfg config.Config
-
-	if err := config.LoadConfig("./config.yaml", &cfg); err != nil {
-		panic(err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -43,9 +41,12 @@ func main() {
 		reader: bufio.NewReader(os.Stdin),
 	}
 
-	maddr := fmt.Sprintf("/ip4/%s/tcp/%d", cfg.Host, cfg.Port)
+	var maddrs []string
+	for _, ip := range config.Conf.Bind {
+		maddrs = append(maddrs, fmt.Sprintf("/ip4/%s/tcp/%d", ip, config.Conf.Port))
+	}
 
-	node, err := transport.NewNode(ctx, maddr, &Handler{PrintPrompt: cli.printPrompt})
+	node, err := transport.NewNode(ctx, maddrs, &Handler{PrintPrompt: cli.printPrompt})
 	if err != nil {
 		panic(err)
 	}

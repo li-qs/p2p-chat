@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"p2pchat/internal/config"
 	"p2pchat/internal/transport/discovery"
 	"p2pchat/internal/transport/message"
 	"sync/atomic"
@@ -36,14 +37,14 @@ const (
 	FileProtocolID = protocol.ID("/chat/file/1.0.0")
 )
 
-func NewNode(ctx context.Context, maddr string, handler Handler) (*Node, error) {
+func NewNode(ctx context.Context, maddrs []string, handler Handler) (*Node, error) {
 	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 
 	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(maddr),
+		libp2p.ListenAddrStrings(maddrs...),
 		libp2p.Identity(prvKey),
 	)
 	if err != nil {
@@ -154,15 +155,15 @@ func (n *Node) streamHandler(s network.Stream) {
 
 // 当对端主动建立文件 stream：开始读取文件，如果读取失败，则强行关闭这个 stream
 func (n *Node) fileStreamHandler(s network.Stream) {
-	tempDir := "./temp"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	dir := config.Conf.CacheDir
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Println(err)
 		_ = s.Reset()
 		return
 	}
 
 	session, _ := n.getOrCreateSession(s.Conn().RemotePeer())
-	if err := session.ReadFile(s, tempDir); err != nil {
+	if err := session.ReadFile(s, dir); err != nil {
 		_ = s.Reset()
 		fmt.Println(err)
 		return

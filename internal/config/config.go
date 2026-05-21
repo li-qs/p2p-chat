@@ -7,12 +7,22 @@ import (
 )
 
 type Config struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Port     int      `yaml:"port"`
+	Bind     []string `yaml:"bind"`
+	CacheDir string   `yaml:"cache_dir"`
 }
 
-func LoadConfig(filepath string, c *Config) error {
-	b, err := os.ReadFile(filepath)
+var Conf Config
+
+func InitConfig(path string) {
+	err := LoadConfig(path, &Conf)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func LoadConfig(path string, c *Config) error {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
