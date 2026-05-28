@@ -45,3 +45,10 @@
 - 每个文件传输独立 stream
 - 生命周期短，一次性使用
 - 与 message stream 完全隔离
+
+## ToDo list
+
+- [ ] GUI
+- [ ] peer 信息
+- [ ] 历史消息
+- [ ] 文件记录
