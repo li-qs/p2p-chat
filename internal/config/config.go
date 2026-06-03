@@ -7,15 +7,19 @@ import (
 )
 
 type Config struct {
-	Port     int      `yaml:"port"`
-	Bind     []string `yaml:"bind"`
-	CacheDir string   `yaml:"cache_dir"`
+	Port    int      `yaml:"port"`
+	Bind    []string `yaml:"bind"`
+	FileDir string   `yaml:"file_dir"`
 }
 
-var Conf Config
+var c Config
 
-func InitConfig(path string) {
-	err := LoadConfig(path, &Conf)
+func Get() Config {
+	return c
+}
+
+func Init(path string) {
+	err := LoadConfig(path, &c)
 	if err != nil {
 		panic(err)
 	}

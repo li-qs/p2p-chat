@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"p2pchat/internal/transport/message"
+	"p2pchat/internal/event"
+	"p2pchat/internal/transport/protocol"
 	"p2pchat/internal/utils"
 	"sync"
 	"sync/atomic"
@@ -19,18 +19,11 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-type Handler interface {
-	OnSessionClosed(peerID peer.ID, err error)
-	OnTextMessage(peerID peer.ID, text string, timestamp int64)
-	OnFileMeta(peerID peer.ID, meta *message.FileMetaPayload, timestamp int64)
-	OnFileReceived(peerID peer.ID, path string)
-}
-
 type Session struct {
 	host       host.Host
+	bus        *event.EventBus
 	PeerID     peer.ID
 	lastAcvite atomic.Int64
-	handler    Handler
 
 	stream network.Stream
 	rw     *bufio.ReadWriter
@@ -51,23 +44,27 @@ type Transfer struct {
 }
 
 const (
-	ErrSessionClosed  = "session closed"
-	ErrStreamExisted  = "stream existed"
-	ErrUnknownMessage = "unknown message"
-	ErrRemoteClosed   = "remote peer closed"
+	ErrSessionClosed    = "session closed"
+	ErrSessionNotActive = "session not active"
+	ErrStreamExisted    = "stream existed"
+	ErrUnknownMessage   = "unknown message"
+	ErrRemoteClosed     = "remote peer closed"
 )
 
-func NewSession(ctx context.Context, host host.Host, peerID peer.ID, handler Handler) *Session {
+func NewSession(ctx context.Context, host host.Host, bus *event.EventBus, peerID peer.ID) *Session {
 	subCtx, cancel := context.WithCancel(ctx)
 	s := &Session{
 		host:            host,
+		bus:             bus,
 		PeerID:          peerID,
 		lastAcvite:      atomic.Int64{},
-		handler:         handler,
 		pendingTransfer: sync.Map{},
 		ctx:             subCtx,
 		cancel:          cancel,
 	}
+	s.bus.Publish(event.SessionCreatedEvent{
+		PeerID: peerID,
+	})
 	return s
 }
 
@@ -82,7 +79,9 @@ func (s *Session) Error() error {
 
 // 是否活跃
 func (s *Session) IsActive(d time.Duration) bool {
-	return time.Now().UnixMilli()-s.lastAcvite.Load() > int64(d.Milliseconds())
+	last := s.lastAcvite.Load()
+	now := time.Now().UnixMilli()
+	return now-last < int64(d.Milliseconds())
 }
 
 // 更新活跃时间
@@ -111,9 +110,9 @@ func (s *Session) closeWithError(err error) {
 		_ = stream.Close()
 	}
 
-	if s.handler != nil {
-		s.handler.OnSessionClosed(s.PeerID, err)
-	}
+	s.bus.Publish(event.SessionClosedEvent{
+		PeerID: s.PeerID,
+	})
 }
 
 // 绑定 stream，并开始监听消息。如果已经绑定过，则拒绝替换
@@ -161,22 +160,15 @@ func (s *Session) ensureStream() error {
 }
 
 // 发送消息
-func (s *Session) Send(payload message.Payload) error {
-	msg, err := message.NewMessage(s.host.ID(), s.PeerID.String(), payload)
+func (s *Session) Send(msg protocol.Message) error {
+	p, err := protocol.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	if err := s.send(msg); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *Session) send(msg *message.Message) error {
 	if err := s.ensureStream(); err != nil {
 		return err
 	}
-	if err := message.WriteMessage(s.rw.Writer, msg); err != nil {
+	if err := protocol.Write(s.rw.Writer, p); err != nil {
 		return err
 	}
 	s.UpdateLastActive()
@@ -216,7 +208,7 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 	defer s.pendingTransfer.Delete(fileID)
 
 	// 发送询问：是否接收文件
-	err = s.Send(message.FileMetaPayload{
+	err = s.Send(protocol.MessageFileMeta{
 		FileID:   fileID,
 		Name:     fileStat.Name(),
 		Size:     fileStat.Size(),
@@ -274,38 +266,29 @@ func (s *Session) sendFile(file *os.File, fileID string) error {
 
 // 发消息：允许你给我发送文件
 func (s *Session) AcceptFile(fileID string) error {
-	return s.Send(message.FileAcceptPayload{FileID: fileID})
+	return s.Send(protocol.MessageFileAccept{FileID: fileID})
 }
 
 // 发消息：拒绝你给我发送文件
 func (s *Session) RejectFile(fileID string) error {
-	return s.Send(message.FileRejectPayload{FileID: fileID})
+	return s.Send(protocol.MessageFileReject{FileID: fileID})
 }
 
 // 向 stream 中写文件：先写入文件头，然后分片写入文件
 // 一个文件一个 stream
 func (s *Session) WriteFile(stream network.Stream, file *os.File, fileID string) error {
 	w := bufio.NewWriter(stream)
-	err := message.WriteFileHeader(w, &message.FileHeader{FileID: fileID})
+	err := protocol.WriteFileInfo(w, &protocol.FileIntoPacket{FileID: fileID})
 	if err != nil {
 		return err
 	}
 	s.UpdateLastActive()
 
-	buf := make([]byte, message.FileChunkSize)
-	for {
-		n, err := file.Read(buf)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return err
-		}
-		if err = message.WriteFileChunk(w, buf[:n]); err != nil {
-			return err
-		}
-
+	err = protocol.WriteFileChunks(w, file, func() {
 		s.UpdateLastActive()
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -315,7 +298,7 @@ func (s *Session) WriteFile(stream network.Stream, file *os.File, fileID string)
 // 一个文件一个 stream
 func (s *Session) ReadFile(stream network.Stream, tempDir string) error {
 	r := bufio.NewReader(stream)
-	h, err := message.ReadFileHeader(r)
+	h, err := protocol.ReadFileInfo(r)
 	if err != nil {
 		return err
 	}
@@ -328,22 +311,18 @@ func (s *Session) ReadFile(stream network.Stream, tempDir string) error {
 	}
 	defer file.Close()
 
-	for {
-		chunk, err := message.ReadFileChunk(r)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return err
-		}
-		if _, err := file.Write(chunk); err != nil {
-			return err
-		}
-
+	err = protocol.ReadFileChunks(r, file, func() {
 		s.UpdateLastActive()
+	})
+	if err != nil {
+		return err
 	}
 
-	s.handler.OnFileReceived(s.PeerID, path)
+	s.bus.Publish(event.FileReceivedEvent{
+		FileID:   h.FileID,
+		FilePath: path,
+	})
+
 	return nil
 }
 
@@ -356,68 +335,86 @@ func (s *Session) listen() {
 		default:
 		}
 
-		msg, err := message.ReadMessage(s.rw.Reader)
+		p, err := protocol.Read(s.rw.Reader)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 
 		s.UpdateLastActive()
-		s.handleMessage(msg)
+		s.handlePacket(p)
 	}
 }
 
-func (s *Session) handleMessage(msg *message.Message) {
-	switch msg.Type {
-	case message.MessageText:
-		s.handleTextMessage(msg)
-	case message.MessageFileMeta:
-		s.handleFileMeta(msg)
-	case message.MessageFileAccept:
-		s.handleFileAccept(msg)
-	case message.MessageFileReject:
-		s.handleFileReject(msg)
+func (s *Session) handlePacket(p *protocol.Packet) {
+	switch p.MessageType {
+	case protocol.TypeText:
+		s.handleTextMessage(p)
+	case protocol.TypeFileMeta:
+		s.handleFileMeta(p)
+	case protocol.TypeFileAccept:
+		s.handleFileAccept(p)
+	case protocol.TypeFileReject:
+		s.handleFileReject(p)
 	default:
 		s.closeWithError(errors.New(ErrUnknownMessage))
 	}
 }
 
 // 处理文本消息
-func (s *Session) handleTextMessage(msg *message.Message) {
-	p, err := message.GetPayload[message.TextPayload](msg)
+func (s *Session) handleTextMessage(p *protocol.Packet) {
+	msg, err := protocol.Unmarshal[protocol.MessageText](p)
 	if err != nil {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.handler.OnTextMessage(s.PeerID, p.Text, msg.Timestamp)
+	s.bus.Publish(event.MessageReceivedEvent{
+		From:      s.PeerID,
+		Timestamp: p.Timestamp,
+		Text:      msg.Text,
+	})
 }
 
 // 处理传文件请求：对方想要发送一个文件，询问你是否接收
-func (s *Session) handleFileMeta(msg *message.Message) {
-	p, err := message.GetPayload[message.FileMetaPayload](msg)
+func (s *Session) handleFileMeta(p *protocol.Packet) {
+	msg, err := protocol.Unmarshal[protocol.MessageFileMeta](p)
 	if err != nil {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.handler.OnFileMeta(s.PeerID, p, msg.Timestamp)
+	s.bus.Publish(event.FileMetaReceivedEvent{
+		From:      s.PeerID,
+		Timestamp: p.Timestamp,
+		FileID:    msg.FileID,
+		Name:      msg.Name,
+		Size:      msg.Size,
+		HashAlgo:  msg.HashAlgo,
+		Hash:      msg.Hash,
+	})
 }
 
 // 处理传文件响应：对方同意接收你发送的文件
-func (s *Session) handleFileAccept(msg *message.Message) {
-	p, err := message.GetPayload[message.FileAcceptPayload](msg)
+func (s *Session) handleFileAccept(p *protocol.Packet) {
+	msg, err := protocol.Unmarshal[protocol.MessageFileAccept](p)
 	if err != nil {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.startTransferFile(p.FileID)
+	s.bus.Publish(event.FileAcceptReceivedEvent{
+		FileID: msg.FileID,
+	})
+	s.startTransferFile(msg.FileID)
 }
 
 // 处理传文件响应：对方拒绝接收你发送的文件
-func (s *Session) handleFileReject(msg *message.Message) {
-	p, err := message.GetPayload[message.FileRejectPayload](msg)
+func (s *Session) handleFileReject(p *protocol.Packet) {
+	msg, err := protocol.Unmarshal[protocol.MessageFileReject](p)
 	if err != nil {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.stopTransferFile(p.FileID)
+	s.bus.Publish(event.FileRejectReceivedEvent{
+		FileID: msg.FileID,
+	})
+	s.stopTransferFile(msg.FileID)
 }

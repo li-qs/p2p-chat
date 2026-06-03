@@ -1,8 +1,11 @@
 package transport
 
 import (
+	"context"
+	"p2pchat/internal/event"
 	"sync"
 
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -13,51 +16,28 @@ type SessionManager struct {
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		sessions: map[peer.ID]*Session{},
+		sessions: make(map[peer.ID]*Session),
 	}
 }
 
-func (m *SessionManager) Load(peerID peer.ID) (session *Session, ok bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s := m.sessions[peerID]
-	if s == nil {
-		return nil, false
-	}
-	return s, true
-}
-
-func (m *SessionManager) Store(peerID peer.ID, newSessoin *Session) {
+func (m *SessionManager) GetOrCreate(ctx context.Context, host host.Host, bus *event.EventBus, peerID peer.ID) (session *Session, loaded bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[peerID] = newSessoin
-}
 
-func (m *SessionManager) LoadOrStore(peerID peer.ID, newSessoin *Session) (session *Session, loaded bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	session = m.sessions[peerID]
 	if session != nil {
 		return session, true
 	}
-	m.sessions[peerID] = newSessoin
-	return newSessoin, false
+
+	session = NewSession(ctx, host, bus, peerID)
+	m.sessions[peerID] = session
+	return
 }
 
 func (m *SessionManager) Delete(peerID peer.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, peerID)
-}
-
-func (m *SessionManager) PeerIDs() []peer.ID {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	peerIDs := make([]peer.ID, 0, len(m.sessions))
-	for i := range m.sessions {
-		peerIDs = append(peerIDs, i)
-	}
-	return peerIDs
 }
 
 func (m *SessionManager) Sessions() []*Session {
