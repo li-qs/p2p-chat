@@ -1,4 +1,4 @@
 port: 0
 bind:
   - "0.0.0.0"
-cache_dir: ./.cache
+file_dir: ./.cache

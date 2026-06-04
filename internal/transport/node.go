@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
-	"p2pchat/internal/config"
+	"p2pchat/internal/event"
 	"p2pchat/internal/transport/discovery"
-	"p2pchat/internal/transport/message"
+	"p2pchat/internal/transport/protocol"
 	"sync/atomic"
 	"time"
 
@@ -16,16 +16,17 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
+	p2pProtocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 )
 
 type Node struct {
 	host    host.Host
 	mdns    *discovery.MdnsService
-	handler Handler
-
 	manager *SessionManager
+	bus     *event.EventBus
+
+	fileDir string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -33,11 +34,11 @@ type Node struct {
 }
 
 const (
-	MainProtocolID = protocol.ID("/chat/main/1.0.0")
-	FileProtocolID = protocol.ID("/chat/file/1.0.0")
+	MainProtocolID = p2pProtocol.ID("/chat/main/1.0.0")
+	FileProtocolID = p2pProtocol.ID("/chat/file/1.0.0")
 )
 
-func NewNode(ctx context.Context, maddrs []string, handler Handler) (*Node, error) {
+func NewNode(ctx context.Context, maddrs []string, bus *event.EventBus, fileDir string) (*Node, error) {
 	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.Reader)
 	if err != nil {
 		return nil, err
@@ -63,7 +64,8 @@ func NewNode(ctx context.Context, maddrs []string, handler Handler) (*Node, erro
 		host:    h,
 		mdns:    mdnsService,
 		manager: NewSessionManager(),
-		handler: handler,
+		bus:     bus,
+		fileDir: fileDir,
 		ctx:     subCtx,
 		cancel:  cancel,
 	}
@@ -113,40 +115,40 @@ func (n *Node) Close() {
 }
 
 // 发送消息
-func (n *Node) Send(peerID peer.ID, payload message.Payload) error {
-	session, _ := n.getOrCreateSession(peerID)
-	return session.Send(payload)
+func (n *Node) Send(peerID peer.ID, msg protocol.Message) error {
+	session := n.getSession(peerID)
+	return session.Send(msg)
 }
 
 // 广播消息：谨慎使用！！！并非真实的广播机制，实际是给每个节点单独发送一次
-func (n *Node) Broadcast(payload message.Payload) {
+func (n *Node) Broadcast(msg protocol.Message) {
 	n.manager.Range(func(peerID peer.ID, s *Session) bool {
-		_ = s.Send(payload)
+		_ = s.Send(msg)
 		return true
 	})
 }
 
 // 发送文件
 func (n *Node) SendFile(peerID peer.ID, path string) error {
-	session, _ := n.getOrCreateSession(peerID)
+	session := n.getSession(peerID)
 	return session.SendFile(path, time.Minute)
 }
 
 // 同意接收文件
 func (n *Node) AcceptFile(peerID peer.ID, fileID string) error {
-	session, _ := n.getOrCreateSession(peerID)
+	session := n.getSession(peerID)
 	return session.AcceptFile(fileID)
 }
 
 // 拒绝接收文件
 func (n *Node) RejectFile(peerID peer.ID, fileID string) error {
-	session, _ := n.getOrCreateSession(peerID)
+	session := n.getSession(peerID)
 	return session.RejectFile(fileID)
 }
 
 // 当对端主动建立 stream：绑定到 session，如果绑定失败，则强制关闭这个 stream
 func (n *Node) streamHandler(s network.Stream) {
-	session, _ := n.getOrCreateSession(s.Conn().RemotePeer())
+	session := n.getSession(s.Conn().RemotePeer())
 	err := session.BindStream(s)
 	if err != nil {
 		_ = s.Reset()
@@ -155,15 +157,14 @@ func (n *Node) streamHandler(s network.Stream) {
 
 // 当对端主动建立文件 stream：开始读取文件，如果读取失败，则强行关闭这个 stream
 func (n *Node) fileStreamHandler(s network.Stream) {
-	dir := config.Conf.CacheDir
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(n.fileDir, 0755); err != nil {
 		fmt.Println(err)
 		_ = s.Reset()
 		return
 	}
 
-	session, _ := n.getOrCreateSession(s.Conn().RemotePeer())
-	if err := session.ReadFile(s, dir); err != nil {
+	session := n.getSession(s.Conn().RemotePeer())
+	if err := session.ReadFile(s, n.fileDir); err != nil {
 		_ = s.Reset()
 		fmt.Println(err)
 		return
@@ -172,9 +173,9 @@ func (n *Node) fileStreamHandler(s network.Stream) {
 	_ = s.Close()
 }
 
-func (n *Node) getOrCreateSession(peerID peer.ID) (session *Session, loaded bool) {
-	s := NewSession(n.ctx, n.host, peerID, n.handler)
-	return n.manager.LoadOrStore(peerID, s)
+func (n *Node) getSession(peerID peer.ID) *Session {
+	s, _ := n.manager.GetOrCreate(n.ctx, n.host, n.bus, peerID)
+	return s
 }
 
 // 定期清理不活跃的 session
@@ -195,7 +196,7 @@ func (n *Node) cleanupLoop(d time.Duration) {
 				}
 				// 采取宽松策略，放大过期时间：网络抖动等因素，可能导致活跃时间更新不及时
 				if !s.IsActive(3 * d) {
-					s.Close()
+					s.closeWithError(fmt.Errorf(ErrSessionNotActive))
 					n.manager.Delete(peerID)
 				}
 				return true
