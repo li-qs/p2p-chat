@@ -126,7 +126,7 @@ func handleEvents() {
 			fmt.Println("")
 			fmt.Println("--------- file ---------")
 			fmt.Println("from:", d.From.String())
-			fmt.Println("file ID:", d.FileID)
+			fmt.Println("transfer ID:", d.TransferID)
 			fmt.Println("name:", d.Name)
 			fmt.Println("size:", d.Size)
 			fmt.Println("hash algo:", d.HashAlgo)
@@ -141,7 +141,7 @@ func handleEvents() {
 	go func() {
 		for e := range ch5 {
 			d := e.(event.FileReceivedEvent)
-			fmt.Printf("\nfile received: %s, path: %s\n", d.FileID, d.FilePath)
+			fmt.Printf("\nfile received: %s, save path: %s\n", d.TransferID, d.SavePath)
 			printPrompt()
 		}
 	}()

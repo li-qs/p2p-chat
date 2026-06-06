@@ -17,24 +17,24 @@ type MessageReceivedEvent struct {
 }
 
 type FileMetaReceivedEvent struct {
-	From      peer.ID
-	Timestamp int64
-	FileID    string
-	Name      string
-	Size      int64
-	HashAlgo  string
-	Hash      string
+	From       peer.ID
+	Timestamp  int64
+	TransferID string
+	Name       string
+	Size       int64
+	HashAlgo   string
+	Hash       string
 }
 
 type FileAcceptReceivedEvent struct {
-	FileID string
+	TransferID string
 }
 
 type FileRejectReceivedEvent struct {
-	FileID string
+	TransferID string
 }
 
 type FileReceivedEvent struct {
-	FileID   string
-	FilePath string
+	TransferID string
+	SavePath   string
 }

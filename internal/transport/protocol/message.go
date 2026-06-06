@@ -21,17 +21,17 @@ type MessageText struct {
 }
 
 type MessageFileMeta struct {
-	FileID   string `msgpack:"file_id"`
-	Name     string `msgpack:"name"`
-	Size     int64  `msgpack:"size"`
-	HashAlgo string `msgpack:"hash_algo"`
-	Hash     string `msgpack:"hash"`
+	TransferID string `msgpack:"trans_id"`
+	Name       string `msgpack:"name"`
+	Size       int64  `msgpack:"size"`
+	HashAlgo   string `msgpack:"hash_algo"`
+	Hash       string `msgpack:"hash"`
 }
 
 type MessageFileAccept struct {
-	FileID string `msgpack:"file_id"`
+	TransferID string `msgpack:"trans_id"`
 }
 
 type MessageFileReject struct {
-	FileID string `msgpack:"file_id"`
+	TransferID string `msgpack:"trans_id"`
 }

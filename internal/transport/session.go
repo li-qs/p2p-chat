@@ -38,9 +38,9 @@ type Session struct {
 }
 
 type Transfer struct {
-	FileID   string
-	accepted chan struct{}
-	reject   chan struct{}
+	TransferID string
+	accepted   chan struct{}
+	reject     chan struct{}
 }
 
 const (
@@ -196,24 +196,24 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 		return err
 	}
 
-	fileID := uuid.NewString()
+	transID := uuid.NewString()
 
 	// 创建并记录文件传输信号
 	trans := &Transfer{
-		FileID:   fileID,
-		accepted: make(chan struct{}),
-		reject:   make(chan struct{}),
+		TransferID: transID,
+		accepted:   make(chan struct{}),
+		reject:     make(chan struct{}),
 	}
-	s.pendingTransfer.Store(fileID, trans)
-	defer s.pendingTransfer.Delete(fileID)
+	s.pendingTransfer.Store(transID, trans)
+	defer s.pendingTransfer.Delete(transID)
 
 	// 发送询问：是否接收文件
 	err = s.Send(protocol.MessageFileMeta{
-		FileID:   fileID,
-		Name:     fileStat.Name(),
-		Size:     fileStat.Size(),
-		HashAlgo: "md5",
-		Hash:     md5,
+		TransferID: transID,
+		Name:       fileStat.Name(),
+		Size:       fileStat.Size(),
+		HashAlgo:   "md5",
+		Hash:       md5,
 	})
 	if err != nil {
 		return err
@@ -222,7 +222,7 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 	// 等待信号：允许/拒绝发送文件，超时退出
 	select {
 	case <-trans.accepted:
-		return s.sendFile(file, fileID)
+		return s.sendFile(file, transID)
 	case <-trans.reject:
 		return nil
 	case <-time.After(timeout):
@@ -233,29 +233,29 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 }
 
 // 发信号：允许发送文件
-func (s *Session) startTransferFile(fileID string) {
-	val, ok := s.pendingTransfer.Load(fileID)
+func (s *Session) startTransferFile(transID string) {
+	val, ok := s.pendingTransfer.Load(transID)
 	if ok {
 		val.(*Transfer).accepted <- struct{}{}
 	}
 }
 
 // 发信号：拒绝发送文件
-func (s *Session) stopTransferFile(fileID string) {
-	val, ok := s.pendingTransfer.Load(fileID)
+func (s *Session) stopTransferFile(transID string) {
+	val, ok := s.pendingTransfer.Load(transID)
 	if ok {
 		val.(*Transfer).reject <- struct{}{}
 	}
 }
 
 // 发送文件
-func (s *Session) sendFile(file *os.File, fileID string) error {
+func (s *Session) sendFile(file *os.File, transID string) error {
 	stream, err := s.host.NewStream(s.ctx, s.PeerID, FileProtocolID)
 	if err != nil {
 		return err
 	}
 
-	if err := s.WriteFile(stream, file, fileID); err != nil {
+	if err := s.WriteFile(stream, file, transID); err != nil {
 		_ = stream.Reset()
 		return err
 	}
@@ -265,20 +265,20 @@ func (s *Session) sendFile(file *os.File, fileID string) error {
 }
 
 // 发消息：允许你给我发送文件
-func (s *Session) AcceptFile(fileID string) error {
-	return s.Send(protocol.MessageFileAccept{FileID: fileID})
+func (s *Session) AcceptFile(transID string) error {
+	return s.Send(protocol.MessageFileAccept{TransferID: transID})
 }
 
 // 发消息：拒绝你给我发送文件
-func (s *Session) RejectFile(fileID string) error {
-	return s.Send(protocol.MessageFileReject{FileID: fileID})
+func (s *Session) RejectFile(transID string) error {
+	return s.Send(protocol.MessageFileReject{TransferID: transID})
 }
 
 // 向 stream 中写文件：先写入文件头，然后分片写入文件
 // 一个文件一个 stream
-func (s *Session) WriteFile(stream network.Stream, file *os.File, fileID string) error {
+func (s *Session) WriteFile(stream network.Stream, file *os.File, transID string) error {
 	w := bufio.NewWriter(stream)
-	err := protocol.WriteFileInfo(w, &protocol.FileIntoPacket{FileID: fileID})
+	err := protocol.WriteFileInfo(w, &protocol.FileIntoPacket{TransferID: transID})
 	if err != nil {
 		return err
 	}
@@ -304,7 +304,7 @@ func (s *Session) ReadFile(stream network.Stream, tempDir string) error {
 	}
 	s.UpdateLastActive()
 
-	path := fmt.Sprintf("%s/%d_%s", tempDir, time.Now().UnixMilli(), h.FileID)
+	path := fmt.Sprintf("%s/%d_%s", tempDir, time.Now().UnixMilli(), h.TransferID)
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -319,8 +319,8 @@ func (s *Session) ReadFile(stream network.Stream, tempDir string) error {
 	}
 
 	s.bus.Publish(event.FileReceivedEvent{
-		FileID:   h.FileID,
-		FilePath: path,
+		TransferID: h.TransferID,
+		SavePath:   path,
 	})
 
 	return nil
@@ -383,13 +383,13 @@ func (s *Session) handleFileMeta(p *protocol.Packet) {
 		return
 	}
 	s.bus.Publish(event.FileMetaReceivedEvent{
-		From:      s.PeerID,
-		Timestamp: p.Timestamp,
-		FileID:    msg.FileID,
-		Name:      msg.Name,
-		Size:      msg.Size,
-		HashAlgo:  msg.HashAlgo,
-		Hash:      msg.Hash,
+		From:       s.PeerID,
+		Timestamp:  p.Timestamp,
+		TransferID: msg.TransferID,
+		Name:       msg.Name,
+		Size:       msg.Size,
+		HashAlgo:   msg.HashAlgo,
+		Hash:       msg.Hash,
 	})
 }
 
@@ -401,9 +401,9 @@ func (s *Session) handleFileAccept(p *protocol.Packet) {
 		return
 	}
 	s.bus.Publish(event.FileAcceptReceivedEvent{
-		FileID: msg.FileID,
+		TransferID: msg.TransferID,
 	})
-	s.startTransferFile(msg.FileID)
+	s.startTransferFile(msg.TransferID)
 }
 
 // 处理传文件响应：对方拒绝接收你发送的文件
@@ -414,7 +414,7 @@ func (s *Session) handleFileReject(p *protocol.Packet) {
 		return
 	}
 	s.bus.Publish(event.FileRejectReceivedEvent{
-		FileID: msg.FileID,
+		TransferID: msg.TransferID,
 	})
-	s.stopTransferFile(msg.FileID)
+	s.stopTransferFile(msg.TransferID)
 }
