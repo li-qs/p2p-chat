@@ -105,10 +105,10 @@ func handleEvents() {
 		}
 	}()
 
-	ch3, _ := bus.Subscribe(event.MessageReceivedEvent{})
+	ch3, _ := bus.Subscribe(event.MessageEvent{})
 	go func() {
 		for e := range ch3 {
-			d := e.(event.MessageReceivedEvent)
+			d := e.(event.MessageEvent)
 			fmt.Println("")
 			fmt.Println("--------- message ---------")
 			fmt.Println("from:", d.From.String())
@@ -119,10 +119,10 @@ func handleEvents() {
 		}
 	}()
 
-	ch4, _ := bus.Subscribe(event.FileMetaReceivedEvent{})
+	ch4, _ := bus.Subscribe(event.FileMetaEvent{})
 	go func() {
 		for e := range ch4 {
-			d := e.(event.FileMetaReceivedEvent)
+			d := e.(event.FileMetaEvent)
 			fmt.Println("")
 			fmt.Println("--------- file ---------")
 			fmt.Println("from:", d.From.String())

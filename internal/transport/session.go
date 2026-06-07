@@ -62,9 +62,7 @@ func NewSession(ctx context.Context, host host.Host, bus *event.EventBus, peerID
 		ctx:             subCtx,
 		cancel:          cancel,
 	}
-	s.bus.Publish(event.SessionCreatedEvent{
-		PeerID: peerID,
-	})
+	s.bus.Publish(event.SessionCreatedEvent{PeerID: peerID})
 	return s
 }
 
@@ -110,9 +108,7 @@ func (s *Session) closeWithError(err error) {
 		_ = stream.Close()
 	}
 
-	s.bus.Publish(event.SessionClosedEvent{
-		PeerID: s.PeerID,
-	})
+	s.bus.Publish(event.SessionClosedEvent{PeerID: s.PeerID})
 }
 
 // 绑定 stream，并开始监听消息。如果已经绑定过，则拒绝替换
@@ -219,13 +215,18 @@ func (s *Session) SendFile(path string, timeout time.Duration) error {
 		return err
 	}
 
+	// TODO: 分离等待过程，在后台等待，函数立即 return
+
 	// 等待信号：允许/拒绝发送文件，超时退出
 	select {
 	case <-trans.accepted:
+		s.bus.Publish(event.FileAcceptedEvent{TransferID: transID})
 		return s.sendFile(file, transID)
 	case <-trans.reject:
+		s.bus.Publish(event.FileRejectedEvent{TransferID: transID})
 		return nil
 	case <-time.After(timeout):
+		s.bus.Publish(event.FileTimeoutEvent{TransferID: transID})
 		return errors.New("waiting for file transfer timed out")
 	case <-s.ctx.Done():
 		return s.ctx.Err()
@@ -266,6 +267,7 @@ func (s *Session) sendFile(file *os.File, transID string) error {
 
 // 发消息：允许你给我发送文件
 func (s *Session) AcceptFile(transID string) error {
+	// TODO: 插入 save path
 	return s.Send(protocol.MessageFileAccept{TransferID: transID})
 }
 
@@ -368,7 +370,7 @@ func (s *Session) handleTextMessage(p *protocol.Packet) {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.bus.Publish(event.MessageReceivedEvent{
+	s.bus.Publish(event.MessageEvent{
 		From:      s.PeerID,
 		Timestamp: p.Timestamp,
 		Text:      msg.Text,
@@ -382,7 +384,7 @@ func (s *Session) handleFileMeta(p *protocol.Packet) {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.bus.Publish(event.FileMetaReceivedEvent{
+	s.bus.Publish(event.FileMetaEvent{
 		From:       s.PeerID,
 		Timestamp:  p.Timestamp,
 		TransferID: msg.TransferID,
@@ -400,9 +402,6 @@ func (s *Session) handleFileAccept(p *protocol.Packet) {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.bus.Publish(event.FileAcceptReceivedEvent{
-		TransferID: msg.TransferID,
-	})
 	s.startTransferFile(msg.TransferID)
 }
 
@@ -413,8 +412,5 @@ func (s *Session) handleFileReject(p *protocol.Packet) {
 		fmt.Printf("decode payload error: %v", err)
 		return
 	}
-	s.bus.Publish(event.FileRejectReceivedEvent{
-		TransferID: msg.TransferID,
-	})
 	s.stopTransferFile(msg.TransferID)
 }
