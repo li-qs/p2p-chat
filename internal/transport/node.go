@@ -135,15 +135,15 @@ func (n *Node) SendFile(peerID peer.ID, path string) error {
 }
 
 // 同意接收文件
-func (n *Node) AcceptFile(peerID peer.ID, fileID string) error {
+func (n *Node) AcceptFile(peerID peer.ID, transID string) error {
 	session := n.getSession(peerID)
-	return session.AcceptFile(fileID)
+	return session.AcceptFile(transID)
 }
 
 // 拒绝接收文件
-func (n *Node) RejectFile(peerID peer.ID, fileID string) error {
+func (n *Node) RejectFile(peerID peer.ID, transID string) error {
 	session := n.getSession(peerID)
-	return session.RejectFile(fileID)
+	return session.RejectFile(transID)
 }
 
 // 当对端主动建立 stream：绑定到 session，如果绑定失败，则强制关闭这个 stream
