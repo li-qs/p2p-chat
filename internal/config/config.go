@@ -7,29 +7,17 @@ import (
 )
 
 type Config struct {
-	Port    int      `yaml:"port"`
-	Bind    []string `yaml:"bind"`
-	FileDir string   `yaml:"file_dir"`
+	Multiaddrs []string `yaml:"multiaddrs"`
+	FileDir    string   `yaml:"file-dir"`
+	DBPath     string   `yaml:"db-path"`
 }
 
-var c Config
-
-func Get() Config {
-	return c
-}
-
-func Init(path string) {
-	err := LoadConfig(path, &c)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func LoadConfig(path string, c *Config) error {
+func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	return yaml.Unmarshal(b, c)
+	var c Config
+	err = yaml.Unmarshal(b, &c)
+	return &c, err
 }
