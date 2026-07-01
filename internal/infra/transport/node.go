@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"p2pchat/internal/infra/transport/protocol"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +39,7 @@ const (
 	fileProtocolID = p2pProtocol.ID("/chat/file/1.0.0")
 )
 
-func NewNode(ctx context.Context, maddrs []string, eventCh chan<- Event, fileSaveDir string) (*Node, error) {
+func NewNode(ctx context.Context, eventCh chan<- Event, fileSaveDir string) (*Node, error) {
 	if err := os.MkdirAll(fileSaveDir, 0755); err != nil {
 		return nil, err
 	}
@@ -48,10 +49,7 @@ func NewNode(ctx context.Context, maddrs []string, eventCh chan<- Event, fileSav
 		return nil, err
 	}
 
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(maddrs...),
-		libp2p.Identity(prvKey),
-	)
+	h, err := libp2p.New(libp2p.Identity(prvKey))
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +58,7 @@ func NewNode(ctx context.Context, maddrs []string, eventCh chan<- Event, fileSav
 			eventCh <- PeerConnectedEvent{PeerID: c.RemotePeer()}
 		},
 		DisconnectedF: func(n network.Network, c network.Conn) {
-			eventCh <- PeerConnectedEvent{PeerID: c.RemotePeer()}
+			eventCh <- PeerDisconnectedEvent{PeerID: c.RemotePeer()}
 		},
 	})
 
@@ -84,7 +82,7 @@ func NewNode(ctx context.Context, maddrs []string, eventCh chan<- Event, fileSav
 	h.SetStreamHandler(msgProtocolID, node.streamHandler)
 	h.SetStreamHandler(fileProtocolID, node.fileStreamHandler)
 
-	go node.cleanSessoin(30 * time.Second)
+	go node.cleanSession(30 * time.Second)
 
 	return node, nil
 }
@@ -109,6 +107,37 @@ func (n *Node) Peers() []peer.ID {
 	return n.host.Peerstore().Peers()
 }
 
+func (n *Node) Addr(peerID peer.ID) string {
+	addrs := n.host.Peerstore().Addrs(peerID)
+	for _, a := range addrs {
+		s := a.String()
+		ip := ""
+		port := ""
+		for _, part := range strings.Split(s, "/") {
+			if part == "" {
+				continue
+			}
+			if part == "ip4" || part == "ip6" {
+				continue
+			}
+			if part == "tcp" || part == "udp" {
+				continue
+			}
+			if strings.Contains(part, ".") || strings.Contains(part, ":") {
+				if ip == "" {
+					ip = part
+				} else if port == "" && len(part) <= 5 {
+					port = part
+				}
+			}
+		}
+		if ip != "" && port != "" {
+			return ip + ":" + port
+		}
+	}
+	return peerID.ShortString()
+}
+
 func (n *Node) Close() {
 	if !n.closed.CompareAndSwap(false, true) {
 		return
@@ -130,9 +159,9 @@ func (n *Node) Send(ctx context.Context, peerID peer.ID, msg protocol.Message) e
 	return n.getOrCreateSession(peerID).send(ctx, msg)
 }
 
-// 发送文件
-func (n *Node) SendFile(ctx context.Context, peerID peer.ID, msg protocol.MessageFileMeta, filePath string) error {
-	return n.getOrCreateSession(peerID).sendFile(ctx, msg, filePath)
+// 发送文件数据：对方同意后，直接推送文件内容
+func (n *Node) SendFile(ctx context.Context, peerID peer.ID, filePath, transID, fileName string) error {
+	return n.getOrCreateSession(peerID).sendFile(filePath, transID, fileName)
 }
 
 // 发消息：同意传输文件
@@ -150,7 +179,6 @@ func (n *Node) streamHandler(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 	err := n.getOrCreateSession(peerID).bindStream(s)
 	if err != nil {
-		// TODO: 错误事件
 		_ = s.Reset()
 	}
 }
@@ -160,7 +188,6 @@ func (n *Node) fileStreamHandler(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
 	err := n.getOrCreateSession(peerID).readFile(s, n.fileSaveDir)
 	if err != nil {
-		// TODO: 错误事件
 		_ = s.Reset()
 		return
 	}
@@ -169,7 +196,7 @@ func (n *Node) fileStreamHandler(s network.Stream) {
 }
 
 // 定期清理不活跃的 session
-func (n *Node) cleanSessoin(d time.Duration) {
+func (n *Node) cleanSession(d time.Duration) {
 	if d < time.Second {
 		d = time.Second
 	}
@@ -188,14 +215,15 @@ func (n *Node) cleanSessoin(d time.Duration) {
 }
 
 func (n *Node) getOrCreateSession(peerID peer.ID) *session {
+	if v, ok := n.sessions.Load(peerID); ok {
+		return v.(*session)
+	}
 	newSession := newSession(n.ctx, peerID, n.host, n.eventCh)
-
 	actual, loaded := n.sessions.LoadOrStore(peerID, newSession)
 	if loaded {
 		newSession.close()
 		return actual.(*session)
 	}
-
 	return newSession
 }
 

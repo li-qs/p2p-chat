@@ -7,9 +7,7 @@ import (
 )
 
 type Config struct {
-	Multiaddrs []string `yaml:"multiaddrs"`
-	FileDir    string   `yaml:"file-dir"`
-	DBPath     string   `yaml:"db-path"`
+	LogLevel string `yaml:"log-level"`
 }
 
 func Load(path string) (*Config, error) {

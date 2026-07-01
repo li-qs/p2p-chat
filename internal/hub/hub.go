@@ -2,14 +2,18 @@ package hub
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
-	"p2pchat/internal/config"
+	"path/filepath"
+	"p2pchat/internal/domain"
 	"p2pchat/internal/hub/web"
 	"p2pchat/internal/infra/storage"
 	"p2pchat/internal/infra/transport"
 	"p2pchat/internal/infra/transport/protocol"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type Hub struct {
@@ -19,23 +23,21 @@ type Hub struct {
 	db      *storage.SQLite
 	node    *transport.Node
 	mux     http.Handler
+	fileDir string
 }
 
 func New(ctx context.Context) (*Hub, error) {
-	cfg, err := config.Load("./config.yaml")
-	if err != nil {
-		return nil, err
-	}
+	const defaultFileDir = "data/files"
 
 	eventCh := make(chan transport.Event, 128)
 	wsCh := make(chan web.WsMessage, 64)
 
-	db, err := storage.NewSQLite(cfg.DBPath)
+	db, err := storage.NewSQLite("data/db/data.db")
 	if err != nil {
 		return nil, err
 	}
 
-	node, err := transport.NewNode(ctx, cfg.Multiaddrs, eventCh, cfg.FileDir)
+	node, err := transport.NewNode(ctx, eventCh, defaultFileDir)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +48,7 @@ func New(ctx context.Context) (*Hub, error) {
 		wsCh:    wsCh,
 		db:      db,
 		node:    node,
+		fileDir: defaultFileDir,
 	}
 
 	mux, err := web.NewServeMux(ctx, wsCh, h)
@@ -84,7 +87,7 @@ func (h *Hub) run() {
 			case transport.FileReceivedEvent:
 				h.onFileReceivedEvent(ev)
 			default:
-				log.Printf("unknown event type: %T", e)
+				slog.Warn("unknown event", "type", fmt.Sprintf("%T", e))
 			}
 		}
 	}
@@ -107,24 +110,65 @@ func (h *Hub) close() {
 	close(h.wsCh)
 }
 
-func (h *Hub) onPeerConnectedEvent(e transport.PeerConnectedEvent) {
-	err := h.SaveFriend(e.PeerID)
+func toPeerID(s string) peer.ID {
+	pid, err := peer.Decode(s)
 	if err != nil {
-		log.Println(err)
-		return
+		return peer.ID(s)
+	}
+	return pid
+}
+
+func (h *Hub) push(msg web.WsMessage) {
+	select {
+	case h.wsCh <- msg:
+	default:
+		slog.Warn("ws channel full, dropping message", "action", msg.Action)
 	}
 }
 
+func (h *Hub) pushRefresh() {
+	h.push(web.WsMessage{Action: web.WsRefresh, Data: "refresh"})
+}
+
+func (h *Hub) onPeerConnectedEvent(e transport.PeerConnectedEvent) {
+	err := h.SaveFriend(e.PeerID)
+	if err != nil {
+		slog.Error("save friend", "peer", e.PeerID, "err", err)
+		return
+	}
+	h.pushRefresh()
+	h.push(web.WsMessage{Action: web.WsPeerStatus, Data: map[string]any{
+		"peerId": e.PeerID.String(),
+		"online": true,
+	}})
+}
+
 func (h *Hub) onPeerDisconnectedEvent(e transport.PeerDisconnectedEvent) {
-	log.Println("peer disconnected: ", e.PeerID)
+	slog.Debug("peer disconnected", "peer", e.PeerID)
+	h.pushRefresh()
+	h.push(web.WsMessage{Action: web.WsPeerStatus, Data: map[string]any{
+		"peerId": e.PeerID.String(),
+		"online": false,
+	}})
 }
 
 func (h *Hub) onMessageEvent(e transport.MessageEvent) {
 	err := h.SaveReceivedMessage(e.From, e.Text, e.Timestamp)
 	if err != nil {
-		log.Println(err)
+		slog.Error("save message", "from", e.From, "err", err)
 		return
 	}
+	count, _ := h.GetUnreadCount(e.From)
+	h.push(web.WsMessage{Action: web.WsNewMessage, Data: map[string]any{
+		"peerId":    e.From.String(),
+		"content":   e.Text,
+		"timestamp": e.Timestamp,
+		"direction": "received",
+	}})
+	h.push(web.WsMessage{Action: web.WsUnreadUpdate, Data: map[string]any{
+		"peerId": e.From.String(),
+		"count":  count,
+	}})
 }
 
 func (h *Hub) onFileMetaEvent(e transport.FileMetaEvent) {
@@ -132,45 +176,128 @@ func (h *Hub) onFileMetaEvent(e transport.FileMetaEvent) {
 		TransferID: e.TransferID,
 		Name:       e.Name,
 		Size:       e.Size,
-		HashAlgo:   e.HashAlgo,
-		Hash:       e.Hash,
 		Timestamp:  e.Timestamp,
 	}
 	err := h.SaveFileMeta(e.From, msg)
 	if err != nil {
-		log.Println(err)
+		slog.Error("save file meta", "from", e.From, "err", err)
 		return
 	}
+	count, _ := h.GetUnreadCount(e.From)
+	h.push(web.WsMessage{Action: web.WsUnreadUpdate, Data: map[string]any{
+		"peerId": e.From.String(),
+		"count":  count,
+	}})
+	h.push(web.WsMessage{Action: web.WsNewMessage, Data: map[string]any{
+		"peerId":    e.From.String(),
+		"type":      int(protocol.TypeFileMeta),
+		"content":   e.TransferID,
+		"timestamp": e.Timestamp,
+		"direction": "received",
+		"fileName":  e.Name,
+		"fileSize":  e.Size,
+		"transId":   e.TransferID,
+		"status":    int(domain.TransferPending),
+	}})
+	h.pushRefresh()
 }
 
 func (h *Hub) onFileAcceptedEvent(e transport.FileAcceptedEvent) {
-	err := h.SetTransferAccepted(e.TransferID)
+	transfer, err := h.db.GetTransfer(e.TransferID)
 	if err != nil {
-		log.Println(err)
+		slog.Error("get transfer", "id", e.TransferID, "err", err)
 		return
 	}
+	if toPeerID(transfer.To) != e.From {
+		slog.Warn("file accepted from wrong peer", "transfer", e.TransferID, "from", e.From, "expected", transfer.To)
+		return
+	}
+
+	err = h.SetTransferAccepted(e.TransferID)
+	if err != nil {
+		slog.Error("set transfer accepted", "transferId", e.TransferID, "err", err)
+		return
+	}
+
+	cachePath := filepath.Join(h.fileDir, e.TransferID)
+	h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+		"type":       "file_accepted",
+		"transferId": e.TransferID,
+	}})
+	h.pushRefresh()
+
+	go func() {
+		h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+			"type":       "file_progress",
+			"transferId": e.TransferID,
+			"progress":   50,
+		}})
+		if err := h.node.SendFile(h.ctx, e.From, cachePath, e.TransferID, transfer.FileName); err != nil {
+			slog.Error("send file data", "transferId", e.TransferID, "err", err)
+			h.SetTransferFailed(e.TransferID)
+			h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+				"type":       "file_failed",
+				"transferId": e.TransferID,
+			}})
+			h.pushRefresh()
+			return
+		}
+		h.SetTransferSuccess(e.TransferID)
+		h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+			"type":       "file_received",
+			"transferId": e.TransferID,
+			"progress":   100,
+		}})
+		h.pushRefresh()
+	}()
 }
 
 func (h *Hub) onFileRejectedEvent(e transport.FileRejectedEvent) {
-	err := h.SetTransferRejected(e.TransferID)
+	transfer, err := h.db.GetTransfer(e.TransferID)
 	if err != nil {
-		log.Println(err)
+		slog.Error("get transfer", "id", e.TransferID, "err", err)
 		return
 	}
+	if toPeerID(transfer.To) != e.From {
+		slog.Warn("file rejected from wrong peer", "transfer", e.TransferID, "from", e.From, "expected", transfer.To)
+		return
+	}
+
+	err = h.SetTransferRejected(e.TransferID)
+	if err != nil {
+		slog.Error("set transfer rejected", "transferId", e.TransferID, "err", err)
+		return
+	}
+	h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+		"type":       "file_rejected",
+		"transferId": e.TransferID,
+	}})
+	h.pushRefresh()
 }
 
 func (h *Hub) onFileTimeoutEvent(e transport.FileTimeoutEvent) {
 	err := h.SetTransferFailed(e.TransferID)
 	if err != nil {
-		log.Println(err)
+		slog.Error("set transfer failed", "transferId", e.TransferID, "err", err)
 		return
 	}
+	h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+		"type":       "file_failed",
+		"transferId": e.TransferID,
+	}})
+	h.pushRefresh()
 }
 
 func (h *Hub) onFileReceivedEvent(e transport.FileReceivedEvent) {
 	err := h.SetTransferSuccess(e.TransferID)
 	if err != nil {
-		log.Println(err)
+		slog.Error("set transfer success", "transferId", e.TransferID, "err", err)
 		return
 	}
+	h.push(web.WsMessage{Action: web.WsFileStatus, Data: map[string]any{
+		"type":       "file_received",
+		"transferId": e.TransferID,
+		"savePath":   e.SavePath,
+	}})
+	h.pushRefresh()
 }

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"p2pchat/internal/infra/transport/protocol"
 	"sync"
 	"sync/atomic"
@@ -19,7 +21,7 @@ import (
 type session struct {
 	host       host.Host
 	peerID     peer.ID
-	lastAcvite atomic.Int64
+	lastActive atomic.Int64
 
 	eventCh chan<- Event
 
@@ -27,18 +29,10 @@ type session struct {
 	rw     *bufio.ReadWriter
 	mu     sync.RWMutex
 
-	pendingTransfer sync.Map
-
 	ctx      context.Context
 	cancel   context.CancelFunc
 	closed   atomic.Bool
 	closeErr error
-}
-
-type fileTransfer struct {
-	transferID string
-	accepted   chan struct{}
-	reject     chan struct{}
 }
 
 const (
@@ -52,13 +46,12 @@ const (
 func newSession(ctx context.Context, peerID peer.ID, host host.Host, eventCh chan<- Event) *session {
 	subCtx, cancel := context.WithCancel(ctx)
 	s := &session{
-		host:            host,
-		peerID:          peerID,
-		lastAcvite:      atomic.Int64{},
-		eventCh:         eventCh,
-		pendingTransfer: sync.Map{},
-		ctx:             subCtx,
-		cancel:          cancel,
+		host:       host,
+		peerID:     peerID,
+		lastActive: atomic.Int64{},
+		eventCh:    eventCh,
+		ctx:        subCtx,
+		cancel:     cancel,
 	}
 	return s
 }
@@ -74,14 +67,14 @@ func (s *session) error() error {
 
 // 是否活跃
 func (s *session) isActive(d time.Duration) bool {
-	last := s.lastAcvite.Load()
+	last := s.lastActive.Load()
 	now := time.Now().UnixMilli()
 	return now-last < int64(d.Milliseconds())
 }
 
 // 更新活跃时间
 func (s *session) updateLastActive() {
-	s.lastAcvite.Store(time.Now().UnixMilli())
+	s.lastActive.Store(time.Now().UnixMilli())
 }
 
 func (s *session) closeWithError(err error) {
@@ -140,7 +133,10 @@ func (s *session) ensureStream() error {
 
 	stream, err := s.host.NewStream(s.ctx, s.peerID, msgProtocolID)
 	if err != nil {
-		return err
+		addrs := s.host.Peerstore().Addrs(s.peerID)
+		conns := s.host.Network().ConnsToPeer(s.peerID)
+		slog.Warn("dial failed", "peer", s.peerID.ShortString(), "addrs", len(addrs), "conns", len(conns), "err", err)
+		return fmt.Errorf("peer %s unreachable: %w", s.peerID.ShortString(), err)
 	}
 
 	if err := s.bindStream(stream); err != nil {
@@ -176,60 +172,8 @@ func (s *session) send(ctx context.Context, msg protocol.Message) error {
 	return nil
 }
 
-// 发送文件：先询问对方是否愿意接收，并等待对方响应，再根据响应决定是否发送文件
-func (s *session) sendFile(ctx context.Context, msg protocol.MessageFileMeta, filePath string) error {
-	// 发送询问：是否接收文件
-	err := s.send(ctx, msg)
-	if err != nil {
-		return err
-	}
-
-	// 等待对方答复
-	go s.waitTransferSignal(ctx, filePath, msg.TransferID)
-	return nil
-}
-
-// 创建并等待文件传输信号
-func (s *session) waitTransferSignal(ctx context.Context, filePath, transID string) {
-	trans := &fileTransfer{
-		transferID: transID,
-		accepted:   make(chan struct{}),
-		reject:     make(chan struct{}),
-	}
-	s.pendingTransfer.Store(transID, trans)
-	defer s.pendingTransfer.Delete(transID)
-
-	select {
-	case <-trans.accepted:
-		s.eventCh <- FileAcceptedEvent{TransferID: transID}
-		s.startTransferFile(filePath, transID)
-	case <-trans.reject:
-		s.eventCh <- FileRejectedEvent{TransferID: transID}
-	case <-ctx.Done():
-		s.eventCh <- FileTimeoutEvent{TransferID: transID}
-	case <-s.ctx.Done():
-		return
-	}
-}
-
-// 信号：允许传输文件
-func (s *session) transferAcceptedSignal(transID string) {
-	val, ok := s.pendingTransfer.Load(transID)
-	if ok {
-		val.(*fileTransfer).accepted <- struct{}{}
-	}
-}
-
-// 信号：拒绝传输文件
-func (s *session) transferRejectedSignal(transID string) {
-	val, ok := s.pendingTransfer.Load(transID)
-	if ok {
-		val.(*fileTransfer).reject <- struct{}{}
-	}
-}
-
-// 传输文件
-func (s *session) startTransferFile(filePath string, transID string) error {
+// 发送文件：直接推送数据，不等待确认
+func (s *session) sendFile(filePath, transID, fileName string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -241,7 +185,7 @@ func (s *session) startTransferFile(filePath string, transID string) error {
 		return err
 	}
 
-	if err := s.writeFile(stream, file, transID); err != nil {
+	if err := s.writeFile(stream, file, transID, fileName); err != nil {
 		_ = stream.Reset()
 		return err
 	}
@@ -250,11 +194,9 @@ func (s *session) startTransferFile(filePath string, transID string) error {
 	return nil
 }
 
-// 向 stream 中写文件：先写入文件头，然后分片写入文件
-// 一个文件一个 stream
-func (s *session) writeFile(stream network.Stream, file *os.File, transID string) error {
+func (s *session) writeFile(stream network.Stream, file *os.File, transID, fileName string) error {
 	w := bufio.NewWriter(stream)
-	err := protocol.WriteFileInfo(w, &protocol.FileIntoPacket{TransferID: transID})
+	err := protocol.WriteFileInfo(w, &protocol.FileIntoPacket{TransferID: transID, FileName: fileName})
 	if err != nil {
 		return err
 	}
@@ -270,17 +212,21 @@ func (s *session) writeFile(stream network.Stream, file *os.File, transID string
 	return nil
 }
 
-// 从 stream 中读文件：先读取文件头，然后读取文件分片，按读取顺序拼接文件（因为发送分片也是顺序的）
-// 一个文件一个 stream
-func (s *session) readFile(stream network.Stream, tempDir string) error {
+// 从 stream 中读文件
+func (s *session) readFile(stream network.Stream, saveDir string) error {
 	r := bufio.NewReader(stream)
 	h, err := protocol.ReadFileInfo(r)
 	if err != nil {
 		return err
 	}
-	s.updateLastActive()
 
-	path := fmt.Sprintf("%s/%d_%s", tempDir, time.Now().UnixMilli(), h.TransferID)
+	path := filepath.Join(saveDir, h.FileName)
+	if _, err := os.Stat(path); err == nil {
+		ext := filepath.Ext(h.FileName)
+		base := h.FileName[:len(h.FileName)-len(ext)]
+		path = filepath.Join(saveDir, fmt.Sprintf("%s_%d%s", base, time.Now().UnixMilli(), ext))
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -313,7 +259,7 @@ func (s *session) listen() {
 
 		p, err := protocol.Read(s.rw.Reader)
 		if err != nil {
-			fmt.Println(err)
+			slog.Warn("protocol read error", "err", err)
 			return
 		}
 
@@ -341,7 +287,7 @@ func (s *session) handlePacket(p *protocol.Packet) {
 func (s *session) handleTextMessage(p *protocol.Packet) {
 	msg, err := protocol.Unmarshal[protocol.MessageText](p)
 	if err != nil {
-		fmt.Printf("decode payload error: %v", err)
+		slog.Debug("decode payload", "type", "text", "err", err)
 		return
 	}
 	s.eventCh <- MessageEvent{
@@ -355,7 +301,7 @@ func (s *session) handleTextMessage(p *protocol.Packet) {
 func (s *session) handleFileMeta(p *protocol.Packet) {
 	msg, err := protocol.Unmarshal[protocol.MessageFileMeta](p)
 	if err != nil {
-		fmt.Printf("decode payload error: %v", err)
+		slog.Debug("decode payload", "type", "file", "err", err)
 		return
 	}
 	s.eventCh <- FileMetaEvent{
@@ -364,8 +310,6 @@ func (s *session) handleFileMeta(p *protocol.Packet) {
 		TransferID: msg.TransferID,
 		Name:       msg.Name,
 		Size:       msg.Size,
-		HashAlgo:   msg.HashAlgo,
-		Hash:       msg.Hash,
 	}
 }
 
@@ -373,18 +317,18 @@ func (s *session) handleFileMeta(p *protocol.Packet) {
 func (s *session) handleFileAccept(p *protocol.Packet) {
 	msg, err := protocol.Unmarshal[protocol.MessageFileAccept](p)
 	if err != nil {
-		fmt.Printf("decode payload error: %v", err)
+		slog.Debug("decode payload", "type", "file", "err", err)
 		return
 	}
-	s.transferAcceptedSignal(msg.TransferID)
+	s.eventCh <- FileAcceptedEvent{From: s.peerID, TransferID: msg.TransferID}
 }
 
 // 处理传文件响应：对方拒绝接收你发送的文件
 func (s *session) handleFileReject(p *protocol.Packet) {
 	msg, err := protocol.Unmarshal[protocol.MessageFileReject](p)
 	if err != nil {
-		fmt.Printf("decode payload error: %v", err)
+		slog.Debug("decode payload", "type", "file", "err", err)
 		return
 	}
-	s.transferRejectedSignal(msg.TransferID)
+	s.eventCh <- FileRejectedEvent{From: s.peerID, TransferID: msg.TransferID}
 }

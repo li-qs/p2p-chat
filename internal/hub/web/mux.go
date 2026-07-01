@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 
 	"p2pchat/internal/domain"
+	"p2pchat/internal/infra/transport/protocol"
 
 	"github.com/gorilla/websocket"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -23,10 +24,14 @@ type Service interface {
 	GetFriends() ([]domain.Friend, error)
 	GetOnlineFriends() ([]domain.Friend, error)
 	GetHistory(peerID peer.ID, lastID int64) ([]domain.Message, error)
+	GetLastMessage(peerID peer.ID) (*domain.Message, error)
 	SendMessage(ctx context.Context, peerID peer.ID, text string) error
 	MarkAsRead(peerID peer.ID) error
 	GetUnreadCount(peerID peer.ID) (int, error)
+	GetUnreadCounts(peerIDs []string) (map[string]int, error)
 	SendFile(ctx context.Context, peerID peer.ID, filePath string) error
+	GetTransfer(transferID string) (*domain.FileTransfer, error)
+	GetAddr(peerID string) string
 	AcceptTransfer(ctx context.Context, transferID string, filePath string) error
 	RejectTransfer(ctx context.Context, transferID string) error
 }
@@ -35,6 +40,14 @@ type WsMessage struct {
 	Action int `json:"action"`
 	Data   any `json:"data"`
 }
+
+const (
+	WsRefresh      = 0
+	WsNewMessage   = 1
+	WsPeerStatus   = 2
+	WsFileStatus   = 3
+	WsUnreadUpdate = 4
+)
 
 type handler struct {
 	service Service
@@ -59,13 +72,13 @@ func NewServeMux(ctx context.Context, wsCh chan WsMessage, service Service) (*ht
 	mux.HandleFunc("GET /ui", h.webUI(indexHTML))
 	mux.HandleFunc("GET /ws", h.upgradeWS(ctx, wsCh))
 	mux.HandleFunc("GET /api/friends", h.getFriends)
-	mux.HandleFunc("GET /api/{peerID}/messages", h.getHistoryMessages)
-	mux.HandleFunc("GET /api/{peerID}/unread", h.getUnreadCount)
-	mux.HandleFunc("POST /api/{peerID}/message", h.sendMessage)
-	mux.HandleFunc("POST /api/{peerID}/read", h.markAsRead)
-	mux.HandleFunc("POST /api/{peerID}/file", h.sendFile)
-	mux.HandleFunc("POST /api/{peerID}/accept-file", h.acceptFile)
-	mux.HandleFunc("POST /api/{peerID}/reject-file", h.rejectFile)
+	mux.HandleFunc("GET /api/messages", h.getHistoryMessages)
+	mux.HandleFunc("GET /api/unread", h.getUnreadCount)
+	mux.HandleFunc("POST /api/message", h.sendMessage)
+	mux.HandleFunc("POST /api/read", h.markAsRead)
+	mux.HandleFunc("POST /api/file", h.sendFile)
+	mux.HandleFunc("POST /api/accept-file", h.acceptFile)
+	mux.HandleFunc("POST /api/reject-file", h.rejectFile)
 
 	return mux, nil
 }
@@ -81,7 +94,7 @@ func (h *handler) upgradeWS(ctx context.Context, wsCh chan WsMessage) func(http.
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := wsUpgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Println("ws upgrade:", err)
+			slog.Warn("ws upgrade", "err", err)
 			return
 		}
 		defer conn.Close()
@@ -113,6 +126,14 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+func toPeerID(s string) peer.ID {
+	pid, err := peer.Decode(s)
+	if err != nil {
+		return peer.ID(s)
+	}
+	return pid
+}
+
 func (h *handler) getFriends(w http.ResponseWriter, r *http.Request) {
 	friends, err := h.service.GetFriends()
 	if err != nil {
@@ -123,29 +144,49 @@ func (h *handler) getFriends(w http.ResponseWriter, r *http.Request) {
 	online, _ := h.service.GetOnlineFriends()
 	onlineSet := make(map[string]bool, len(online))
 	for _, f := range online {
-		onlineSet[f.PeerID] = true
+		onlineSet[toPeerID(f.PeerID).String()] = true
 	}
 
 	type friendInfo struct {
 		PeerID   string `json:"peerId"`
-		Nickname string `json:"nickname"`
+		Addr     string `json:"addr"`
 		Online   bool   `json:"online"`
+		LastMsg  string `json:"lastMsg"`
+		LastTime int64  `json:"lastTime"`
+		Unread   int    `json:"unread"`
 	}
 
 	result := make([]friendInfo, len(friends))
-	for i, f := range friends {
-		result[i] = friendInfo{
-			PeerID:   f.PeerID,
-			Nickname: f.Nickname,
-			Online:   onlineSet[f.PeerID],
-		}
-	}
 
+	peerIDs := make([]string, len(friends))
+	for i, f := range friends {
+		peerIDs[i] = f.PeerID
+	}
+	unreadMap, _ := h.service.GetUnreadCounts(peerIDs)
+
+	for i, f := range friends {
+		pid := toPeerID(f.PeerID).String()
+		info := friendInfo{
+			PeerID:   pid,
+			Addr:     h.service.GetAddr(f.PeerID),
+			Online:   onlineSet[pid],
+			Unread:   unreadMap[f.PeerID],
+		}
+		if last, _ := h.service.GetLastMessage(toPeerID(f.PeerID)); last != nil {
+			info.LastMsg = last.Content
+			info.LastTime = last.Timestamp
+		}
+		result[i] = info
+	}
 	writeJSON(w, result)
 }
 
 func (h *handler) getHistoryMessages(w http.ResponseWriter, r *http.Request) {
-	peerID := r.PathValue("peerID")
+	peerID := r.URL.Query().Get("peerId")
+	if peerID == "" {
+		writeError(w, http.StatusBadRequest, "peerId required")
+		return
+	}
 
 	lastID := int64(0)
 	if v := r.URL.Query().Get("lastID"); v != "" {
@@ -154,7 +195,7 @@ func (h *handler) getHistoryMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	msgs, err := h.service.GetHistory(peer.ID(peerID), lastID)
+	msgs, err := h.service.GetHistory(toPeerID(peerID), lastID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -164,30 +205,43 @@ func (h *handler) getHistoryMessages(w http.ResponseWriter, r *http.Request) {
 		ID        int64  `json:"id"`
 		From      string `json:"from"`
 		To        string `json:"to"`
-		Read      int    `json:"read"`
 		Type      int    `json:"type"`
 		Content   string `json:"content"`
 		Timestamp int64  `json:"timestamp"`
 		Direction string `json:"direction"`
+		FileName  string `json:"fileName,omitempty"`
+		FileSize  int64  `json:"fileSize,omitempty"`
+		TransID   string `json:"transId,omitempty"`
+		Status    int    `json:"status,omitempty"`
+		FilePath  string `json:"filePath,omitempty"`
 	}
 
 	myPeerID := h.service.MyPeerID()
 	result := make([]msgInfo, len(msgs))
 	for i, m := range msgs {
 		dir := "received"
-		if m.From == myPeerID {
+		if toPeerID(m.From).String() == toPeerID(myPeerID).String() {
 			dir = "sent"
 		}
-		result[i] = msgInfo{
+		info := msgInfo{
 			ID:        m.ID,
 			From:      m.From,
 			To:        m.To,
-			Read:      m.Read,
 			Type:      m.Type,
 			Content:   m.Content,
 			Timestamp: m.Timestamp,
 			Direction: dir,
 		}
+		if m.Type == int(protocol.TypeFileMeta) {
+			if t, _ := h.service.GetTransfer(m.Content); t != nil {
+				info.FileName = t.FileName
+				info.FileSize = t.Size
+				info.TransID = t.TransferID
+				info.Status = int(t.Status)
+				info.FilePath = t.FilePath
+			}
+		}
+		result[i] = info
 	}
 
 	hasMore := len(result) == 100
@@ -198,12 +252,11 @@ func (h *handler) getHistoryMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendMessageReq struct {
-	Text string `json:"text"`
+	PeerID string `json:"peerId"`
+	Text   string `json:"text"`
 }
 
 func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
-	peerID := r.PathValue("peerID")
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read body failed")
@@ -215,12 +268,12 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Text == "" {
-		writeError(w, http.StatusBadRequest, "text is required")
+	if req.PeerID == "" || req.Text == "" {
+		writeError(w, http.StatusBadRequest, "peerId and text required")
 		return
 	}
 
-	err = h.service.SendMessage(r.Context(), peer.ID(peerID), req.Text)
+	err = h.service.SendMessage(r.Context(), toPeerID(req.PeerID), req.Text)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -229,10 +282,28 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-func (h *handler) markAsRead(w http.ResponseWriter, r *http.Request) {
-	peerID := r.PathValue("peerID")
+type markReadReq struct {
+	PeerID string `json:"peerId"`
+}
 
-	if err := h.service.MarkAsRead(peer.ID(peerID)); err != nil {
+func (h *handler) markAsRead(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body failed")
+		return
+	}
+
+	var req markReadReq
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.PeerID == "" {
+		writeError(w, http.StatusBadRequest, "peerId required")
+		return
+	}
+
+	if err := h.service.MarkAsRead(toPeerID(req.PeerID)); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -241,9 +312,13 @@ func (h *handler) markAsRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getUnreadCount(w http.ResponseWriter, r *http.Request) {
-	peerID := r.PathValue("peerID")
+	peerID := r.URL.Query().Get("peerId")
+	if peerID == "" {
+		writeError(w, http.StatusBadRequest, "peerId required")
+		return
+	}
 
-	count, err := h.service.GetUnreadCount(peer.ID(peerID))
+	count, err := h.service.GetUnreadCount(toPeerID(peerID))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -253,14 +328,13 @@ func (h *handler) getUnreadCount(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendFileReq struct {
+	PeerID   string `json:"peerId"`
 	FilePath string `json:"filePath"`
 }
 
 func (h *handler) sendFile(w http.ResponseWriter, r *http.Request) {
-	peerID := r.PathValue("peerID")
-
 	contentType := r.Header.Get("Content-Type")
-	var filePath string
+	var peerID, filePath string
 
 	if contentType == "application/json" || contentType == "" {
 		body, err := io.ReadAll(r.Body)
@@ -273,8 +347,10 @@ func (h *handler) sendFile(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
+		peerID = req.PeerID
 		filePath = req.FilePath
 	} else {
+		peerID = r.URL.Query().Get("peerId")
 		file, header, err := r.FormFile("file")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "read file failed: "+err.Error())
@@ -295,12 +371,12 @@ func (h *handler) sendFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if filePath == "" {
-		writeError(w, http.StatusBadRequest, "filePath is required")
+	if peerID == "" || filePath == "" {
+		writeError(w, http.StatusBadRequest, "peerId and filePath required")
 		return
 	}
 
-	err := h.service.SendFile(r.Context(), peer.ID(peerID), filePath)
+	err := h.service.SendFile(r.Context(), toPeerID(peerID), filePath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

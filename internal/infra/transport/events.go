@@ -28,22 +28,23 @@ type FileMetaEvent struct {
 	TransferID string
 	Name       string
 	Size       int64
-	HashAlgo   string
-	Hash       string
 }
 
 // 文件传输被接受
 type FileAcceptedEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
 // 文件传输被拒绝
 type FileRejectedEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
 // 传输请求等待超时
 type FileTimeoutEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
@@ -51,4 +52,10 @@ type FileTimeoutEvent struct {
 type FileReceivedEvent struct {
 	TransferID string
 	SavePath   string
+}
+
+// 文件传输进度
+type FileProgressEvent struct {
+	TransferID string
+	Progress   int64 // 0-100
 }

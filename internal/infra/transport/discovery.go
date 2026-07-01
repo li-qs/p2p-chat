@@ -3,9 +3,11 @@ package transport
 import (
 	"context"
 	"io"
+	"log/slog"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 )
 
@@ -28,7 +30,14 @@ type discovery struct {
 func initDiscovery(ctx context.Context, host host.Host) (*discovery, error) {
 	service := mdns.NewMdnsService(host, rendezvous, &notifee{
 		OnPeerFound: func(pi peer.AddrInfo) {
-			_ = host.Connect(ctx, pi)
+			if pi.ID == host.ID() {
+				return
+			}
+			slog.Debug("mDNS peer found", "peer", pi.ID, "addrs", pi.Addrs)
+			host.Peerstore().AddAddrs(pi.ID, pi.Addrs, peerstore.PermanentAddrTTL)
+			if err := host.Connect(ctx, pi); err != nil {
+				slog.Warn("mDNS connect failed", "peer", pi.ID, "err", err)
+			}
 		},
 	})
 	if err := service.Start(); err != nil {

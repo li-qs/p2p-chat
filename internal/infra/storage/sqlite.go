@@ -59,12 +59,3 @@ func (db *SQLite) NamedSelect(dest any, query string, arg any) error {
 	q = db.Rebind(q)
 	return db.Select(dest, q, args...)
 }
-
-func (db *SQLite) NamedGet(dest any, query string, arg any) error {
-	q, args, err := sqlx.Named(query, arg)
-	if err != nil {
-		return err
-	}
-	q = db.Rebind(q)
-	return db.Get(dest, q, args...)
-}

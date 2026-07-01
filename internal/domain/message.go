@@ -12,5 +12,5 @@ type Message struct {
 	Read      int    `db:"read"`
 	Type      int    `db:"type"`
 	Content   string `db:"content"`
-	Timestamp int64  `db:"ts"`
+	Timestamp int64  `db:"timestamp"`
 }

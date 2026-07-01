@@ -1,4 +1,1 @@
-multiaddrs:
-  - /ip4/0.0.0.0/tcp/0
-file-dir: data/files
-db-path: data/db/data.db
+log-level: info

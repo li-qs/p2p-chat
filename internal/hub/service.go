@@ -2,10 +2,11 @@ package hub
 
 import (
 	"context"
+	"io"
 	"os"
+	"path/filepath"
 	"p2pchat/internal/domain"
 	"p2pchat/internal/infra/transport/protocol"
-	"p2pchat/pkg/utils"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,8 +26,8 @@ func (h *Hub) SaveFriend(peerID peer.ID) error {
 
 func (h *Hub) SaveReceivedMessage(peerID peer.ID, text string, timestamp int64) error {
 	return h.db.SaveMessage(&domain.Message{
-		From:      h.node.PeerID().String(),
-		To:        peerID.String(),
+		From:      peerID.String(),
+		To:        h.node.PeerID().String(),
 		Read:      domain.MessageUnread,
 		Type:      int(protocol.TypeText),
 		Content:   text,
@@ -64,6 +65,22 @@ func (h *Hub) GetUnreadCount(peerID peer.ID) (int, error) {
 	return h.db.CountUnreadMessages(peerID.String())
 }
 
+func (h *Hub) GetUnreadCounts(peerIDs []string) (map[string]int, error) {
+	return h.db.CountUnreadMessagesByPeers(peerIDs)
+}
+
+func (h *Hub) GetLastMessage(peerID peer.ID) (*domain.Message, error) {
+	return h.db.GetLastMessage(peerID.String())
+}
+
+func (h *Hub) GetTransfer(transferID string) (*domain.FileTransfer, error) {
+	return h.db.GetTransfer(transferID)
+}
+
+func (h *Hub) GetAddr(s string) string {
+	return h.node.Addr(toPeerID(s))
+}
+
 func (h *Hub) GetFriends() ([]domain.Friend, error) {
 	return h.db.GetFriends()
 }
@@ -81,35 +98,29 @@ func (h *Hub) GetOnlineFriends() ([]domain.Friend, error) {
 	return friends, nil
 }
 
-func (h *Hub) SetNickname(peerID peer.ID, nickname string) error {
-	return h.db.UpdateFriendNickname(peerID.String(), nickname)
-}
-
 func (h *Hub) SendFile(ctx context.Context, peerID peer.ID, filePath string) error {
-	file, err := os.Open(filePath)
+	src, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer src.Close()
 
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return err
-	}
-
-	md5, err := utils.FileMD5(file)
+	fileInfo, err := src.Stat()
 	if err != nil {
 		return err
 	}
 
 	transID := uuid.NewString()
 
+	cachePath := filepath.Join(h.fileDir, transID)
+	if err := copyFile(cachePath, filePath); err != nil {
+		return err
+	}
+
 	msg := protocol.MessageFileMeta{
 		TransferID: transID,
 		Name:       fileInfo.Name(),
 		Size:       fileInfo.Size(),
-		HashAlgo:   "md5",
-		Hash:       md5,
 		Timestamp:  time.Now().UnixMilli(),
 	}
 
@@ -120,8 +131,6 @@ func (h *Hub) SendFile(ctx context.Context, peerID peer.ID, filePath string) err
 		TransferID: msg.TransferID,
 		FileName:   msg.Name,
 		Size:       msg.Size,
-		HashAlgo:   msg.HashAlgo,
-		Hash:       msg.Hash,
 		Timestamp:  msg.Timestamp,
 	})
 	if err != nil {
@@ -140,20 +149,45 @@ func (h *Hub) SendFile(ctx context.Context, peerID peer.ID, filePath string) err
 		return err
 	}
 
-	return h.node.SendFile(ctx, peerID, msg, filePath)
+	return h.node.Send(ctx, peerID, msg)
+}
+
+func copyFile(dst, src string) error {
+	s, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	d, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	_, err = io.Copy(d, s)
+	return err
 }
 
 func (h *Hub) SaveFileMeta(peerID peer.ID, msg protocol.MessageFileMeta) error {
-	return h.db.SaveTransfer(&domain.FileTransfer{
+	err := h.db.SaveTransfer(&domain.FileTransfer{
 		From:       peerID.String(),
 		To:         h.node.PeerID().String(),
 		Status:     domain.TransferPending,
 		TransferID: msg.TransferID,
 		FileName:   msg.Name,
 		Size:       msg.Size,
-		HashAlgo:   msg.HashAlgo,
-		Hash:       msg.Hash,
 		Timestamp:  msg.Timestamp,
+	})
+	if err != nil {
+		return err
+	}
+
+	return h.db.SaveMessage(&domain.Message{
+		From:      peerID.String(),
+		To:        h.node.PeerID().String(),
+		Read:      domain.MessageUnread,
+		Type:      int(protocol.TypeFileMeta),
+		Content:   msg.TransferID,
+		Timestamp: msg.Timestamp,
 	})
 }
 
@@ -198,7 +232,7 @@ func (h *Hub) AcceptTransfer(ctx context.Context, transferID string, filePath st
 	}
 
 	msg := protocol.MessageFileAccept{TransferID: transferID, Timestamp: time.Now().UnixMilli()}
-	return h.node.AcceptFile(ctx, peer.ID(transfer.From), msg)
+	return h.node.AcceptFile(ctx, toPeerID(transfer.From), msg)
 }
 
 func (h *Hub) RejectTransfer(ctx context.Context, transferID string) error {
@@ -213,5 +247,5 @@ func (h *Hub) RejectTransfer(ctx context.Context, transferID string) error {
 	}
 
 	msg := protocol.MessageFileReject{TransferID: transferID, Timestamp: time.Now().UnixMilli()}
-	return h.node.RejectFile(ctx, peer.ID(transfer.From), msg)
+	return h.node.RejectFile(ctx, toPeerID(transfer.From), msg)
 }
