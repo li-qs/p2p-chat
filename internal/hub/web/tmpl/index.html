@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P2P Chat</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:#f0f0f0}
+.app{max-width:1200px;margin:0 auto;height:100vh;display:flex;flex-direction:column}
+.main{flex:1;display:flex;overflow:hidden}
+#connBar{display:none;background:#f5222d;color:#fff;text-align:center;padding:6px;font-size:13px;flex-shrink:0}
+#connBar.show{display:block}
+.left{width:280px;min-width:260px;background:#2e2e2e;color:#ccc;display:flex;flex-direction:column;border-right:1px solid #1a1a1a;padding-top:0}
+.left h3{padding:16px;font-size:16px;border-bottom:1px solid #1a1a1a;color:#eee;font-weight:500;flex-shrink:0}
+#friendList{flex:1;overflow-y:auto}
+.friend-item{padding:12px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #3a3a3a;transition:background .15s}
+.friend-item:hover{background:#3a3a3a}
+.friend-item.active{background:#4a4a4a;color:#fff}
+.friend-item .info{flex:1;min-width:0;overflow:hidden}
+.friend-item .name{font-size:15px;color:#ddd}
+.friend-item .peer{font-size:11px;color:#777;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.friend-item .lastmsg{font-size:12px;color:#888;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.friend-item .meta{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;margin-left:8px}
+.friend-item .meta .time{font-size:11px;color:#666;white-space:nowrap}
+.friend-item .badge{background:#f5222d;color:#fff;border-radius:10px;padding:1px 7px;font-size:12px;min-width:18px;text-align:center}
+.friend-item .badge.zero{visibility:hidden}
+.friend-item.offline .name{color:#666}
+.friend-item.offline .peer{color:#555}
+.friend-section{display:none}
+.offline-tag{font-size:10px;color:#f5222d;border:1px solid #f5222d;border-radius:2px;padding:0 3px;margin-left:4px;vertical-align:middle}
+.right{flex:1;display:flex;flex-direction:column;min-width:400px;background:#f5f5f5}
+#popup{background:#f5222d;color:#fff;padding:8px 16px;display:none;justify-content:space-between;align-items:center;font-size:14px;flex-shrink:0}
+#popup.show{display:flex}
+#popup button{background:none;border:none;color:#fff;cursor:pointer;font-size:16px;margin-left:12px}
+#chatHeader{padding:12px 24px;background:#ededed;border-bottom:1px solid #ddd;display:none;flex-direction:column;gap:2px;flex-shrink:0}
+#chatHeader.show{display:flex}
+#chatTitle{font-size:16px;font-weight:500;color:#333}
+#chatPeer{font-size:12px;color:#999}
+#chatView{flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:4px}
+.empty-chat{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px;user-select:none}
+.load-more{text-align:center;padding:8px;color:#999;font-size:12px;user-select:none;flex-shrink:0}
+.load-more span{cursor:pointer}
+.load-more span:hover{color:#666}
+.load-more .loading{color:#bbb;cursor:default}
+.msg-row{display:flex;margin-bottom:6px;flex-shrink:0}
+.msg-row.sent{justify-content:flex-end}
+.msg-row.received{justify-content:flex-start}
+.msg-row .wrapper{max-width:72%}
+.bubble{padding:10px 14px;border-radius:8px;word-break:break-word;white-space:pre-wrap;line-height:1.5;font-size:14px}
+.bubble.sent{background:#95ec69;color:#000;border-top-right-radius:2px}
+.bubble.received{background:#fff;color:#333;border:1px solid #e8e8e8;border-top-left-radius:2px}
+.time{font-size:11px;color:#aaa;margin-top:2px}
+.msg-row.sent .time{text-align:right}
+.msg-row.received .time{text-align:left}
+#filePreview{display:none;padding:8px 24px;background:#fafafa;border-top:1px solid #e0e0e0;align-items:center;gap:10px;flex-shrink:0}
+#filePreview.show{display:flex}
+#fileName{flex:1;font-size:13px;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#filePreview button{padding:4px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px}
+#filePreview button:first-of-type{background:#07c160;color:#fff}
+#filePreview button:first-of-type:hover{background:#06ad56}
+#filePreview button:last-of-type{background:#fff;color:#999;border:1px solid #d9d9d9}
+.input-area{padding:12px 24px;background:#fff;border-top:1px solid #e0e0e0;display:flex;gap:10px;align-items:flex-end;flex-shrink:0}
+.input-area textarea{flex:1;border:1px solid #d9d9d9;border-radius:4px;padding:8px 12px;font-size:14px;font-family:inherit;outline:none;resize:none;min-height:40px;max-height:120px;line-height:1.5;transition:border-color .2s}
+.input-area textarea:focus{border-color:#07c160}
+.input-area button{padding:8px 24px;background:#07c160;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:14px;white-space:nowrap;transition:background .2s;flex-shrink:0}
+.input-area button:hover{background:#06ad56}
+.input-area button:disabled{background:#bdbdbd;cursor:not-allowed}
+.attach-btn{width:36px;height:36px;border-radius:4px;border:1px solid #d9d9d9;background:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;flex-shrink:0;user-select:none;transition:all .2s}
+.attach-btn:hover{border-color:#07c160}
+.file-msg{font-size:14px;margin-bottom:4px}
+.file-status{font-size:11px;color:#999;margin-top:4px}
+.file-actions{margin-top:6px;display:flex;gap:8px}
+.file-actions button{padding:4px 12px;border-radius:4px;border:1px solid #d9d9d9;background:#fff;cursor:pointer;font-size:12px}
+.file-actions button:first-child{background:#07c160;color:#fff;border-color:#07c160}
+.file-path{font-size:11px;color:#999;margin-top:4px}
+.file-path-input{flex:1;padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:12px;min-width:0}
+.path-row{display:flex;gap:4px;margin-bottom:6px}
+.browse-btn{padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;white-space:nowrap}
+.browse-btn:hover{border-color:#07c160}
+.progress-bar{height:4px;background:#e8e8e8;border-radius:2px;margin-top:6px;overflow:hidden}
+.progress-bar .fill{height:100%;background:#07c160;border-radius:2px;transition:width .3s}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-thumb{background:#ccc;border-radius:3px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="app">
+  <div id="connBar">⚠ 服务已断开，正在重连…</div>
+  <div class="main">
+    <div class="left">
+      <h3>好友列表</h3>
+      <div id="friendList"></div>
+    </div>
+    <div class="right">
+      <div id="popup"><span id="popupMsg"></span><button onclick="hidePopup()">✕</button></div>
+      <div id="chatHeader"><span id="chatTitle"></span><span id="chatPeer"></span></div>
+      <div id="chatView"><div class="empty-chat">选择一个好友开始聊天</div></div>
+      <div id="filePreview"><span id="fileName"></span><button onclick="confirmFile()">发送</button><button onclick="cancelFile()">取消</button></div>
+      <div class="input-area" id="inputArea" style="display:none">
+        <textarea id="msgInput" placeholder="输入消息… Shift+Enter 换行，Enter 发送" rows="1" disabled></textarea>
+        <input type="file" id="fileInput" style="display:none" onchange="onFileSelected()">
+        <label class="attach-btn" title="发送文件">&#x1F4CE;</label>
+        <button onclick="sendMsg()" id="sendBtn">发送</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let ws, chatSessions = {}, currentPeer = '', oldestIDs = {}, hasMore = {}, loadingMore = false, popupTimer;
+
+const api = {
+  get: async (url) => { const r = await fetch(url); if(!r.ok) throw new Error(r.status); return r.json(); },
+  post: async (url, body) => { const r = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error(r.status); return r.json(); },
+  upload: async (url, form) => { const r = await fetch(url, {method:'POST',body:form}); if(!r.ok) throw new Error(r.status); return r.json(); }
+};
+
+// ---- WebSocket push ----
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    switch(msg.action) {
+      case 0: // refresh
+        loadFriends();
+        break;
+      case 1: // new_message
+        if(!chatSessions[msg.data.peerId]) chatSessions[msg.data.peerId] = [];
+        chatSessions[msg.data.peerId].push(msg.data);
+        if(msg.data.peerId === currentPeer) { renderMessages(); scrollChatBottom(); if(msg.data.type!==2) markRead(currentPeer); }
+        break;
+      case 2: // peer_status
+        if(window._friends) {
+          let f = window._friends.find(x => x.peerId === msg.data.peerId);
+          if(f) { f.online = msg.data.online; renderFriends(window._friends); }
+          else { loadFriends(); }
+          if(msg.data.peerId === currentPeer) updateInputState();
+        }
+        break;
+      case 3: // file_status
+        if(msg.data.transferId && currentPeer) {
+          const msgs = chatSessions[currentPeer]||[];
+          for(const m of msgs) {
+            if(m.transId===msg.data.transferId) {
+              if(msg.data.type==='file_accepted') m.status=2;
+              else if(msg.data.type==='file_rejected') m.status=3;
+              else if(msg.data.type==='file_failed') m.status=6;
+              else if(msg.data.type==='file_received') { m.status=5; if(msg.data.savePath) m.filePath=msg.data.savePath; }
+              else if(msg.data.type==='file_progress') m.progress=msg.data.progress||0;
+            }
+          }
+          renderMessages();
+        }
+        break;
+      case 4: // unread_update
+        if(window._friends) {
+          const f = window._friends.find(x => x.peerId === msg.data.peerId);
+          if(f) { f.unread = msg.data.count; renderFriends(window._friends); }
+        }
+        break;
+    }
+  };
+  ws.onopen = () => { document.getElementById('connBar').classList.remove('show'); loadFriends(); };
+  ws.onclose = () => { document.getElementById('connBar').classList.add('show'); setTimeout(connect, 3000); };
+}
+
+// ---- Friends ----
+async function loadFriends() {
+  const data = await api.get('/api/friends');
+  window._friends = data;
+  renderFriends(data);
+  if(currentPeer) updateInputState();
+}
+function renderFriends(list) {
+  document.getElementById('friendList').innerHTML = list.map(f => friendItemHTML(f)).join('');
+}
+function friendItemHTML(f) {
+  const time = f.lastTime ? new Date(f.lastTime).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}) : '';
+  const offlineTag = f.online ? '' : ' <span class="offline-tag">离线</span>';
+  return '<div class="friend-item'+(f.peerId===currentPeer?' active':'')+(f.online?'':' offline')+'" onclick="selectFriend(\''+f.peerId+'\')">'+
+    '<div class="info"><div class="name">'+esc(f.addr||f.peerId)+offlineTag+'</div><div class="lastmsg">'+esc(f.lastMsg||'')+'</div></div>'+
+    '<div class="meta"><span class="time">'+esc(time)+'</span><span class="badge'+(f.unread===0?' zero':'')+'">'+f.unread+'</span></div></div>';
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ---- Chat ----
+async function selectFriend(peerId) {
+  currentPeer = peerId;
+  cancelFile();
+  updateInputState();
+  if(window._friends) renderFriends(window._friends);
+  const f = (window._friends||[]).find(x => x.peerId===peerId);
+  document.getElementById('chatTitle').textContent = f?(f.addr||f.peerId):'';
+  document.getElementById('chatPeer').textContent = (f?f.peerId:'')+(f&&f.online?'':' · 离线');
+  document.getElementById('chatHeader').classList.add('show');
+  oldestIDs[peerId] = 0;
+  hasMore[peerId] = true;
+  loadingMore = false;
+  chatSessions[peerId] = [];
+  await loadMessages(peerId);
+  scrollChatBottom();
+  markRead(peerId);
+}
+async function loadMessages(peerId) {
+  if(loadingMore) return;
+  loadingMore = true;
+  try {
+    let url = '/api/messages?peerId='+peerId+'&lastID='+(oldestIDs[peerId]||0);
+    const data = await api.get(url);
+    if(data.messages) chatSessions[peerId] = data.messages.concat(chatSessions[peerId]||[]);
+    if(data.messages && data.messages.length>0) oldestIDs[peerId] = data.messages[0].id;
+    hasMore[peerId] = data.hasMore;
+  } catch(e) { showPopup('加载消息失败'); }
+  loadingMore = false;
+  renderMessages();
+}
+function renderMessages() {
+  const el = document.getElementById('chatView');
+  const msgs = chatSessions[currentPeer]||[];
+  if(!currentPeer||msgs.length===0) { el.innerHTML = '<div class="empty-chat">'+(currentPeer?'暂无消息':'选择一个好友开始聊天')+'</div>'; return; }
+  let html = hasMore[currentPeer] ? '<div class="load-more">'+(loadingMore?'<span class="loading">加载中…</span>':'<span onclick="loadMore()">↑ 加载更多消息</span>')+'</div>' : '';
+  for(const m of msgs) {
+    const d = new Date(m.timestamp), time = (d.getMonth()+1)+'-'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+    if(m.type === 2) {
+      html += renderFileMsg(m, time);
+    } else {
+      html += '<div class="msg-row '+m.direction+'"><div class="wrapper"><div class="bubble '+m.direction+'">'+esc(m.content)+'</div><div class="time">'+time+'</div></div></div>';
+    }
+  }
+  el.innerHTML = html;
+}
+function renderFileMsg(m, time) {
+  const statusText = ['','等待确认','已接收','已拒绝','传输中','传输完成','传输失败'];
+  const st = m.status||1;
+  let actions = '', progressBar = '';
+  if(m.direction==='received' && st===1) {
+    actions = '<div class="file-actions"><div class="path-row">'+
+      '<input class="file-path-input" id="path_'+m.transId+'" placeholder="'+defaultSavePath()+'" value="'+defaultSavePath()+'">'+
+      '<button class="browse-btn" onclick="browseFolder(\''+m.transId+'\')">浏览</button></div>'+
+      '<button onclick="acceptFile(\''+m.transId+'\')">接收</button><button onclick="rejectFile(\''+m.transId+'\')">拒绝</button></div>';
+  }
+  if(typeof m.progress === 'number' && m.progress > 0 && m.progress < 100) {
+    progressBar = '<div class="progress-bar"><div class="fill" style="width:'+m.progress+'%"></div></div>';
+  }
+  let pathInfo = '';
+  if(m.filePath) pathInfo = '<div class="file-path">📁 '+esc(m.filePath)+'</div>';
+  return '<div class="msg-row '+m.direction+'"><div class="wrapper"><div class="bubble '+m.direction+'">' +
+    '<div class="file-msg">📎 '+esc(m.fileName||'文件')+' ('+formatSize(m.fileSize||0)+')</div>' +
+    '<div class="file-status">'+statusText[st]+'</div>' +
+    progressBar + pathInfo + actions +
+    '</div><div class="time">'+time+'</div></div></div>';
+}
+function defaultSavePath() { return 'data/files'; }
+async function browseFolder(transId) {
+  try {
+    const handle = await window.showDirectoryPicker();
+    document.getElementById('path_'+transId).value = handle.name;
+  } catch(e) {}
+}
+async function acceptFile(transId) {
+  const pathEl = document.getElementById('path_'+transId);
+  const path = pathEl ? pathEl.value.trim() || 'data/files' : 'data/files';
+  try { await api.post('/api/accept-file', {transferID:transId, filePath:path}); loadMessages(currentPeer); } catch(e) { showPopup('操作失败'); }
+}
+async function rejectFile(transId) {
+  try { await api.post('/api/reject-file', {transferID:transId}); loadMessages(currentPeer); } catch(e) { showPopup('操作失败'); }
+}
+function loadMore() {
+  if(!currentPeer||!hasMore[currentPeer]||loadingMore) return;
+  loadingMore = true;
+  renderMessages();
+  loadMessages(currentPeer).then(() => { loadingMore=false; renderMessages(); });
+}
+function scrollChatBottom() {
+  requestAnimationFrame(() => { const el = document.getElementById('chatView'); el.scrollTop = el.scrollHeight; });
+}
+async function markRead(peerId) {
+  try { await api.post('/api/read', {peerId:peerId});
+    if(window._friends) { const f = window._friends.find(x => x.peerId===peerId); if(f) { f.unread = 0; renderFriends(window._friends); } }
+  } catch(e) {}
+}
+function updateInputState() {
+  const f = (window._friends||[]).find(x => x.peerId===currentPeer);
+  const online = f ? f.online : false;
+  document.getElementById('msgInput').disabled = !online;
+  document.getElementById('sendBtn').disabled = !online;
+  if(online) document.getElementById('msgInput').focus();
+  document.getElementById('msgInput').placeholder = online?'输入消息… Shift+Enter 换行，Enter 发送':'对方离线，上线后才能发送消息';
+  document.getElementById('inputArea').style.display = '';
+}
+
+// ---- Send ----
+async function sendMsg() {
+  const input = document.getElementById('msgInput');
+  const content = input.value.trim();
+  if(!content||!currentPeer||input.disabled) return;
+  input.value = ''; input.style.height = 'auto';
+  const msg = {direction:'sent', content:content, timestamp:Date.now()};
+  if(!chatSessions[currentPeer]) chatSessions[currentPeer] = [];
+  chatSessions[currentPeer].push(msg);
+  renderMessages();
+  scrollChatBottom();
+  try {
+    await api.post('/api/message', {peerId:currentPeer, text:content});
+    await loadFriends();
+  } catch(e) { showPopup('发送失败'); }
+}
+function onFileSelected() {
+  const input = document.getElementById('fileInput');
+  if(!input.files.length) return;
+  if(!currentPeer||document.getElementById('msgInput').disabled) return;
+  const file = input.files[0];
+  document.getElementById('fileName').textContent = file.name+' ('+formatSize(file.size)+')';
+  document.getElementById('filePreview').classList.add('show');
+  window._pendingFile = file;
+  input.value = '';
+}
+async function confirmFile() {
+  if(!window._pendingFile) return;
+  const f = window._pendingFile;
+  cancelFile();
+  const local = {type:2, direction:'sent', fileName:f.name, fileSize:f.size, status:1, timestamp:Date.now()};
+  if(!chatSessions[currentPeer]) chatSessions[currentPeer] = [];
+  chatSessions[currentPeer].push(local);
+  renderMessages();
+  scrollChatBottom();
+  const form = new FormData();
+  form.append('file', f);
+  try { await api.upload('/api/file?peerId='+currentPeer, form); await loadMessages(currentPeer); } catch(e) { showPopup('发送文件失败'); }
+}
+function cancelFile() {
+  window._pendingFile = null;
+  document.getElementById('filePreview').classList.remove('show');
+  document.getElementById('fileInput').value = '';
+}
+function formatSize(bytes) {
+  if(bytes<1024) return bytes+' B';
+  if(bytes<1048576) return (bytes/1024).toFixed(1)+' KB';
+  return (bytes/1048576).toFixed(1)+' MB';
+}
+
+// ---- Popup ----
+function showPopup(msg) {
+  document.getElementById('popupMsg').textContent = msg;
+  document.getElementById('popup').classList.add('show');
+  clearTimeout(popupTimer);
+  popupTimer = setTimeout(hidePopup, 5000);
+}
+function hidePopup() {
+  document.getElementById('popup').classList.remove('show');
+  clearTimeout(popupTimer);
+}
+
+// ---- Events ----
+document.getElementById('msgInput').addEventListener('keydown', function(e) {
+  if(e.key==='Enter'&&!e.shiftKey&&!this.disabled) { e.preventDefault(); sendMsg(); }
+});
+document.querySelector('.attach-btn').addEventListener('click', function() {
+  if(!currentPeer||document.getElementById('msgInput').disabled) return;
+  document.getElementById('fileInput').click();
+});
+document.getElementById('msgInput').addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120)+'px';
+});
+document.getElementById('chatView').addEventListener('scroll', function() {
+  if(this.scrollTop===0&&currentPeer&&hasMore[currentPeer]&&!loadingMore) loadMore();
+});
+
+connect();
+</script>
+</body>
+</html>

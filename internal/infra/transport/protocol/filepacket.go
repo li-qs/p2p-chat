@@ -13,6 +13,7 @@ const fileChunkSize = 64 * 1024
 
 type FileIntoPacket struct {
 	TransferID string `msgpack:"trans_id"`
+	FileName   string `msgpack:"file_name"`
 }
 
 func WriteFileInfo(w *bufio.Writer, p *FileIntoPacket) error {

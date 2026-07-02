@@ -7,29 +7,15 @@ import (
 )
 
 type Config struct {
-	Port    int      `yaml:"port"`
-	Bind    []string `yaml:"bind"`
-	FileDir string   `yaml:"file_dir"`
+	LogLevel string `yaml:"log-level"`
 }
 
-var c Config
-
-func Get() Config {
-	return c
-}
-
-func Init(path string) {
-	err := LoadConfig(path, &c)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func LoadConfig(path string, c *Config) error {
+func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	return yaml.Unmarshal(b, c)
+	var c Config
+	err = yaml.Unmarshal(b, &c)
+	return &c, err
 }

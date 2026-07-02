@@ -1,14 +1,16 @@
-package event
+package transport
 
 import "github.com/libp2p/go-libp2p/core/peer"
 
+type Event interface{}
+
 // session 创建
-type SessionCreatedEvent struct {
+type PeerConnectedEvent struct {
 	PeerID peer.ID
 }
 
 // session 关闭
-type SessionClosedEvent struct {
+type PeerDisconnectedEvent struct {
 	PeerID peer.ID
 }
 
@@ -26,22 +28,23 @@ type FileMetaEvent struct {
 	TransferID string
 	Name       string
 	Size       int64
-	HashAlgo   string
-	Hash       string
 }
 
 // 文件传输被接受
 type FileAcceptedEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
 // 文件传输被拒绝
 type FileRejectedEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
 // 传输请求等待超时
 type FileTimeoutEvent struct {
+	From       peer.ID
 	TransferID string
 }
 
@@ -49,4 +52,10 @@ type FileTimeoutEvent struct {
 type FileReceivedEvent struct {
 	TransferID string
 	SavePath   string
+}
+
+// 文件传输进度
+type FileProgressEvent struct {
+	TransferID string
+	Progress   int64 // 0-100
 }

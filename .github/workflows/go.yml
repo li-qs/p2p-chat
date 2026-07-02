@@ -3,59 +3,64 @@ name: build
 on:
   push:
     branches: ["main"]
-    tags: ["v*"] # 当推送 v1.0.0 这样的标签时触发
+    tags: ["v*"]
   pull_request:
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: go vet
+        run: go vet ./internal/... ./cmd/...
 
-      - name: Show version info
-        run: |
-          go version
-          git rev-parse --short HEAD
-
-      - name: Build cli (make)
-        run: make cli
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+  build:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          name: p2p-chat-cli
+          go-version: "1.26"
+      - name: build
+        run: CGO_ENABLED=0 go build -o build/p2p-chat ./cmd/app/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2p-chat
           path: build/
 
-  # ========== 发布到 Releases ==========
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') # 仅标签推送时运行
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
-
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
     steps:
-      - name: Download built artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          name: p2p-chat-cli
+          go-version: "1.26"
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: CGO_ENABLED=0 go build -o build/p2p-chat-${{ matrix.goos }}-${{ matrix.goarch}}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/app/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2p-chat-${{ matrix.goos }}-${{ matrix.goarch }}
           path: build/
-
-      - name: List files (for debugging)
-        run: ls -la build/
-
-      - name: Create Release and Upload Assets
+      - name: release
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         uses: ncipollo/release-action@v1
         with:
           artifacts: "build/*"
           token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true # 允许覆盖更新
+          allowUpdates: true
           generateReleaseNotes: true
-          draft: false

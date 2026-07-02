@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"bufio"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/vmihailenco/msgpack/v5"
@@ -11,9 +10,8 @@ import (
 const maxPacketSize = 1024 * 1024
 
 type Packet struct {
-	ID          string      `msgpack:"id"` // message ID
+	ID          string      `msgpack:"id"`
 	MessageType MessageType `msgpack:"tp"`
-	Timestamp   int64       `msgpack:"ts"`
 	Message     []byte      `msgpack:"msg"`
 }
 
@@ -26,7 +24,6 @@ func Marshal(m Message) (*Packet, error) {
 	return &Packet{
 		ID:          uuid.NewString(),
 		MessageType: m.MessageType(),
-		Timestamp:   time.Now().UnixMilli(),
 		Message:     raw,
 	}, nil
 }
